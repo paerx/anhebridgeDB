@@ -1,0 +1,14 @@
+[
+  {
+    "id": "auto_timeout_order_stress",
+    "pattern": "OrderStatus:*:wait_for_paid",
+    "target": "OrderStatus:{id}:timeout",
+    "delay": "15s",
+    "delay_seconds": 15,
+    "enabled": true,
+    "created_at": "2026-03-14T06:34:29.475625Z",
+    "match_count": 5000,
+    "execute_count": 5000,
+    "skip_count": 17472
+  }
+]

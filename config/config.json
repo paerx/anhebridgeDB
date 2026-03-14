@@ -1,0 +1,8 @@
+{
+  "storage": {
+    "segment": {
+      "max_bytes": 67108864,
+      "max_records": 20000
+    }
+  }
+}

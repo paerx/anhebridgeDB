@@ -1,0 +1,8 @@
+# Go build cache
+.gocache/
+
+# Local runtime data
+data/**/*.anhe
+
+# Docs assets and local docs payloads
+docs/*
