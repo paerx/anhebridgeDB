@@ -13,13 +13,13 @@
 </p>
 
 <p align="center">
-  <a href="https://your-demo.example.com">Live Demo</a>
+  <a href="https://github.com/paerx/anhebridgeDB">Live Demo</a>
   ·
-  <a href="https://your-playground.example.com">DSL Playground</a>
+  <a href="https://github.com/paerx/anhebridgeDB">DSL Playground</a>
   ·
-  <a href="https://your-docs.example.com">Docs</a>
+  <a href="https://github.com/paerx/anhebridgeDB">Docs</a>
   ·
-  <a href="https://your-api.example.com">API</a>
+  <a href="https://github.com/paerx/anhebridgeDB">API</a>
 </p>
 
 ## Overview
