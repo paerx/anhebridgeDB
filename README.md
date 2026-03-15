@@ -43,6 +43,106 @@ AnheBridgeDB v1 covers the current MVP path described in `docs/`:
 go run ./cmd/server -addr :8080 -data ./data -scheduler-interval 1s
 ```
 
+## DSL Examples
+
+```sql
+SET userBalance:0xabc 100;
+SET userBalance:0xabc -10 SEND i=tx-001;
+SET userBalance:0xabc 10 RECEIVED i=tx-001;
+ASET balance:123 -10 SEND i=tx-002, balance:456 10 RECEIVED i=tx-002;
+GET userBalance:0xabc;
+AGET userBalance:0xabc balance:123 balance:456;
+GET userBalance:0xabc AT '2026-03-13T10:00:00Z';
+GET userBalance:0xabc LAST;
+GET userBalance:0xabc LAST -1 -1;
+GET userBalance:0xabc ALLTIME;
+GET userBalance:0xabc ALLTIME WITH DIFF;
+GET userBalance:0xabc ALLTIME LIMIT 100 BEFORE VERSION:2000 AFTER VERSION:1500;
+SEARCH EVENTS KEY:userBalance:0xabc NAME:SEND DESC LIMIT:20 PAGE:1;
+SEARCH EVENTS I:tx-001;
+SEARCH EVENTS KEY:userBalance:0xabc NAME:SEND WITH SAME I;
+ROLLBACK userBalance:0xabc VERSION:5;
+ROLLBACK userBalance:0xabc VERSION:LAST;
+CHECK userBalance:0xabc ALLTIME;
+CHECK userBalance:0xabc ALLTIME LIMIT 1000;
+VERIFY STORAGE;
+COMPACT STORAGE;
+
+CREATE RULE auto_timeout_order
+ON PATTERN "OrderStatus:*:wait_for_paid"
+IF UNCHANGED FOR 15m
+THEN TRANSITION TO "OrderStatus:{id}:timeout";
+
+SHOW RULES;
+SHOW RULE auto_timeout_order;
+RUN SCHEDULER;
+```
+
+## Command Catalog
+
+### Write Commands
+
+```sql
+SET key value;
+SET key delta EVENT;
+SET key value EVENT i=business-id;
+ASET key value, key value EVENT, key value EVENT i=business-id;
+DELETE key;
+```
+
+### Read Commands
+
+```sql
+GET key;
+AGET key1 key2 key3;
+GET key AT '2026-03-15T04:00:00Z';
+GET key LAST;
+GET key LAST -1 -1;
+GET key ALLTIME;
+GET key ALLTIME WITH DIFF;
+GET key ALLTIME LIMIT 100 BEFORE VERSION:10 AFTER VERSION:5;
+```
+
+### Search Commands
+
+```sql
+SEARCH EVENTS KEY:balance:1234 NAME:SEND;
+SEARCH EVENTS KEY:balance:1234 NAME:SEND DESC LIMIT:20 PAGE:1;
+SEARCH EVENTS I:abcd;
+SEARCH EVENTS KEY:balance:1234 NAME:SEND WITH SAME I;
+```
+
+Search behavior:
+
+- `NAME:` filters by event name using the secondary event-name index
+- `I:` filters by `idempotency_key`
+- `WITH SAME I` expands the matched result set to every event that shares the same business idempotency key
+- `PAGE:n` performs direct page slicing on the indexed result set
+
+### Recovery And Integrity Commands
+
+```sql
+ROLLBACK key VERSION:5;
+ROLLBACK key VERSION:LAST;
+CHECK key ALLTIME;
+CHECK key ALLTIME LIMIT 1000;
+VERIFY STORAGE;
+COMPACT STORAGE;
+```
+
+### Rule Commands
+
+```sql
+CREATE RULE auto_timeout_order
+ON PATTERN "OrderStatus:*:wait_for_paid"
+IF UNCHANGED FOR 15m
+THEN TRANSITION TO "OrderStatus:{id}:timeout";
+
+SHOW RULES;
+SHOW RULE auto_timeout_order;
+RUN SCHEDULER;
+```
+
 Segment rolling is configurable in [config.json](/Users/pangaichen/Desktop/AnheBridageDB/config/config.json):
 
 ```json
@@ -624,110 +724,5 @@ flowchart LR
   G -- "Yes" --> I["Append AUTO_TRANSITION Event"]
 ```
 
-## DSL Examples
 
-```sql
-SET userBalance:0xabc 100;
-SET userBalance:0xabc -10 SEND i=tx-001;
-SET userBalance:0xabc 10 RECEIVED i=tx-001;
-ASET balance:123 -10 SEND i=tx-002, balance:456 10 RECEIVED i=tx-002;
-GET userBalance:0xabc;
-AGET userBalance:0xabc balance:123 balance:456;
-GET userBalance:0xabc AT '2026-03-13T10:00:00Z';
-GET userBalance:0xabc LAST;
-GET userBalance:0xabc LAST -1 -1;
-GET userBalance:0xabc ALLTIME;
-GET userBalance:0xabc ALLTIME WITH DIFF;
-GET userBalance:0xabc ALLTIME LIMIT 100 BEFORE VERSION:2000 AFTER VERSION:1500;
-SEARCH EVENTS KEY:userBalance:0xabc NAME:SEND DESC LIMIT:20 PAGE:1;
-SEARCH EVENTS I:tx-001;
-SEARCH EVENTS KEY:userBalance:0xabc NAME:SEND WITH SAME I;
-ROLLBACK userBalance:0xabc VERSION:5;
-ROLLBACK userBalance:0xabc VERSION:LAST;
-CHECK userBalance:0xabc ALLTIME;
-CHECK userBalance:0xabc ALLTIME LIMIT 1000;
-VERIFY STORAGE;
-COMPACT STORAGE;
 
-CREATE RULE auto_timeout_order
-ON PATTERN "OrderStatus:*:wait_for_paid"
-IF UNCHANGED FOR 15m
-THEN TRANSITION TO "OrderStatus:{id}:timeout";
-
-SHOW RULES;
-SHOW RULE auto_timeout_order;
-RUN SCHEDULER;
-```
-
-## Command Catalog
-
-### Write Commands
-
-```sql
-SET key value;
-SET key delta EVENT;
-SET key value EVENT i=business-id;
-ASET key value, key value EVENT, key value EVENT i=business-id;
-DELETE key;
-```
-
-### Read Commands
-
-```sql
-GET key;
-AGET key1 key2 key3;
-GET key AT '2026-03-15T04:00:00Z';
-GET key LAST;
-GET key LAST -1 -1;
-GET key ALLTIME;
-GET key ALLTIME WITH DIFF;
-GET key ALLTIME LIMIT 100 BEFORE VERSION:10 AFTER VERSION:5;
-```
-
-### Search Commands
-
-```sql
-SEARCH EVENTS KEY:balance:1234 NAME:SEND;
-SEARCH EVENTS KEY:balance:1234 NAME:SEND DESC LIMIT:20 PAGE:1;
-SEARCH EVENTS I:abcd;
-SEARCH EVENTS KEY:balance:1234 NAME:SEND WITH SAME I;
-```
-
-Search behavior:
-
-- `NAME:` filters by event name using the secondary event-name index
-- `I:` filters by `idempotency_key`
-- `WITH SAME I` expands the matched result set to every event that shares the same business idempotency key
-- `PAGE:n` performs direct page slicing on the indexed result set
-
-### Recovery And Integrity Commands
-
-```sql
-ROLLBACK key VERSION:5;
-ROLLBACK key VERSION:LAST;
-CHECK key ALLTIME;
-CHECK key ALLTIME LIMIT 1000;
-VERIFY STORAGE;
-COMPACT STORAGE;
-```
-
-### Rule Commands
-
-```sql
-CREATE RULE auto_timeout_order
-ON PATTERN "OrderStatus:*:wait_for_paid"
-IF UNCHANGED FOR 15m
-THEN TRANSITION TO "OrderStatus:{id}:timeout";
-
-SHOW RULES;
-SHOW RULE auto_timeout_order;
-RUN SCHEDULER;
-```
-
-## Scope Notes
-
-The docs also mention LSM/SSTable/compaction/WAL manifest/grpc. Those are still simplified in this MVP:
-
-1. current-state and event-position indexes are persisted, but this is still not an LSM/SSTable engine
-2. task processing now uses worker threads, but bucket sub-sharding and compaction are still simplified
-3. timeline and `GET AT` walk a per-key version chain via `prev_version_offset`, with bounded event caching rather than full event residency
