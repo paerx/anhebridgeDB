@@ -19,10 +19,18 @@
   ·
   <a href="https://github.com/paerx/anhebridgeDB">Docs</a>
   ·
-  <a href="https://github.com/paerx/anhebridgeDB">API</a>
+
+<a href="https://mail.google.com/mail/?view=cm&fs=1&to=realpaerpang@gmail.com">
+  Contact me with Gmail
+</a>
 </p>
 
 ## Overview
+
+## Contact
+
+- Email: [realpaerpang@gmail.com](mailto:realpaerpang@gmail.com)
+- GitHub: https://github.com/paerx
 
 AnheBridgeDB v1 covers the current MVP path described in `docs/`:
 
@@ -65,6 +73,7 @@ ROLLBACK userBalance:0xabc VERSION:5;
 ROLLBACK userBalance:0xabc VERSION:LAST;
 CHECK userBalance:0xabc ALLTIME;
 CHECK userBalance:0xabc ALLTIME LIMIT 1000;
+SNAPSHOT;
 VERIFY STORAGE;
 COMPACT STORAGE;
 
@@ -126,6 +135,7 @@ ROLLBACK key VERSION:5;
 ROLLBACK key VERSION:LAST;
 CHECK key ALLTIME;
 CHECK key ALLTIME LIMIT 1000;
+SNAPSHOT;
 VERIFY STORAGE;
 COMPACT STORAGE;
 ```
@@ -723,6 +733,5 @@ flowchart LR
   G -- "No" --> H["Skip Task"]
   G -- "Yes" --> I["Append AUTO_TRANSITION Event"]
 ```
-
 
 
