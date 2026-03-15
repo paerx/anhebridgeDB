@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -22,6 +23,13 @@ type request struct {
 
 type response struct {
 	Results []any `json:"results"`
+}
+
+type authState struct {
+	Addr      string    `json:"addr"`
+	Token     string    `json:"token"`
+	Username  string    `json:"username"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type editor struct {
@@ -53,13 +61,24 @@ type keyEvent struct {
 }
 
 var completions = []string{
+	"ASET",
+	"AGET",
 	"SET",
 	"GET",
+	"SEARCH EVENTS",
 	"DELETE",
+	"ROLLBACK",
+	"CHECK",
+	"VERIFY STORAGE",
+	"COMPACT STORAGE",
+	"SHOW METRICS",
+	"SHOW PERF",
 	"CREATE RULE",
 	"SHOW RULES",
 	"SHOW RULE",
 	"RUN SCHEDULER",
+	"login",
+	"logout",
 	"help",
 	"exit",
 	"quit",
@@ -75,9 +94,10 @@ func main() {
 
 	client := &http.Client{Timeout: *timeout}
 
+	store, _ := loadAuthState()
 	switch {
 	case strings.TrimSpace(*execute) != "":
-		if err := runOnce(client, *addr, *execute); err != nil {
+		if err := runOnce(store, *addr, *execute); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -87,21 +107,27 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if err := runOnce(client, *addr, string(input)); err != nil {
+		if err := runOnce(store, *addr, string(input)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	default:
-		if err := repl(client, *addr); err != nil {
+		if err := repl(client, store, *addr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	}
 }
 
-func repl(client *http.Client, addr string) error {
+func repl(client *http.Client, store *authState, addr string) error {
 	fmt.Printf("anhebridgedb-cli connected to %s\n", addr)
 	printHelpSummary()
+
+	ws, err := newWSExecutor(addr, store)
+	if err != nil {
+		return err
+	}
+	defer ws.close()
 
 	ed, err := newEditor(int(os.Stdin.Fd()))
 	if err != nil {
@@ -133,6 +159,30 @@ func repl(client *http.Client, addr string) error {
 			case "help", "\\help":
 				ed.withCooked(printHelpTable)
 				continue
+			case "login":
+				ed.withCooked(func() {
+					if err := loginFlow(client, store, addr); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return
+					}
+					_ = ws.updateToken(addr, store)
+				})
+				continue
+			case "logout":
+				ed.withCooked(func() {
+					if err := clearAuthState(); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return
+					}
+					if store != nil {
+						store.Token = ""
+						store.Username = ""
+						store.ExpiresAt = time.Time{}
+					}
+					_ = ws.updateToken(addr, store)
+					fmt.Println("logged out")
+				})
+				continue
 			case "exit", "quit":
 				if confirmExit(ed, statement.String()) {
 					fmt.Println("bye")
@@ -149,7 +199,7 @@ func repl(client *http.Client, addr string) error {
 		}
 
 		ed.withCooked(func() {
-			if err := runOnce(client, addr, statement.String()); err != nil {
+			if err := runOnceWithWS(ws, statement.String()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 			}
 		})
@@ -157,42 +207,138 @@ func repl(client *http.Client, addr string) error {
 	}
 }
 
-func runOnce(client *http.Client, addr, query string) error {
+func runOnce(store *authState, addr, query string) error {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil
 	}
-
-	body, err := json.Marshal(request{Query: query})
+	ws, err := newWSExecutor(addr, store)
 	if err != nil {
 		return err
 	}
+	defer ws.close()
+	return runOnceWithWS(ws, query)
+}
 
-	resp, err := client.Post(strings.TrimRight(addr, "/")+"/dsl", "application/json", bytes.NewReader(body))
+func runOnceWithWS(ws *wsExecutor, query string) error {
+	results, err := ws.execute(query)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("server error (%s): %s", resp.Status, strings.TrimSpace(string(respBytes)))
-	}
-
-	var payload response
-	if err := json.Unmarshal(respBytes, &payload); err != nil {
-		return fmt.Errorf("decode response: %w", err)
-	}
-
-	formatted, err := json.MarshalIndent(payload.Results, "", "  ")
+	formatted, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(formatted))
+	return nil
+}
+
+func loginFlow(client *http.Client, store *authState, addr string) error {
+	username, password, err := promptCredentials()
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(map[string]string{
+		"username": username,
+		"password": password,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(addr, "/")+"/auth/login", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("login failed (%s): %s", resp.Status, strings.TrimSpace(string(respBytes)))
+	}
+	var payload struct {
+		Token     string    `json:"token"`
+		Username  string    `json:"username"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(respBytes, &payload); err != nil {
+		return fmt.Errorf("decode login response: %w", err)
+	}
+	state := &authState{
+		Addr:      strings.TrimRight(addr, "/"),
+		Token:     payload.Token,
+		Username:  payload.Username,
+		ExpiresAt: payload.ExpiresAt,
+	}
+	if err := saveAuthState(state); err != nil {
+		return err
+	}
+	if store != nil {
+		*store = *state
+	}
+	fmt.Printf("logged in as %s\n", payload.Username)
+	return nil
+}
+
+func promptCredentials() (string, string, error) {
+	var username string
+	fmt.Print("username: ")
+	if _, err := fmt.Scanln(&username); err != nil {
+		return "", "", err
+	}
+	var password string
+	fmt.Print("password: ")
+	if _, err := fmt.Scanln(&password); err != nil {
+		return "", "", err
+	}
+	return strings.TrimSpace(username), password, nil
+}
+
+func authStatePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ".anhebridge_cli_auth.json"
+	}
+	return filepath.Join(home, ".anhebridge_cli_auth.json")
+}
+
+func loadAuthState() (*authState, error) {
+	path := authStatePath()
+	bytes, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &authState{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var state authState
+	if err := json.Unmarshal(bytes, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+func saveAuthState(state *authState) error {
+	if state == nil {
+		return nil
+	}
+	bytes, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(authStatePath(), bytes, 0o600)
+}
+
+func clearAuthState() error {
+	if err := os.Remove(authStatePath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 
@@ -405,14 +551,38 @@ func printHelpSummary() {
 
 func printHelpTable() {
 	rows := [][2]string{
-		{"SET key value;", "write a value"},
+		{"SET key value;", "write or overwrite a value"},
+		{"SET key delta EVENT;", "numeric delta update with custom event name"},
+		{"SET key value EVENT i=business-id;", "idempotent write with custom business id"},
+		{"ASET key value, key value EVENT;", "batch write multiple keys"},
 		{"GET key;", "read current value"},
-		{"GET key AT 'ts';", "read value at RFC3339 time"},
-		{"GET key ALLTIME;", "show full timeline"},
-		{"GET key ALLTIME WITH DIFF;", "show timeline with field diff"},
-		{"CREATE RULE ...;", "create auto transition rule"},
-		{"SHOW RULES;", "list rules"},
+		{"AGET key1 key2 ...;", "batch read multiple keys"},
+		{"GET key AT '2026-03-15T04:00:00Z';", "read value at RFC3339 time"},
+		{"GET key LAST;", "read previous version"},
+		{"GET key LAST -1 -1;", "walk further up the version chain"},
+		{"GET key ALLTIME;", "show timeline window"},
+		{"GET key ALLTIME WITH DIFF;", "show timeline with JSON diff"},
+		{"GET key ALLTIME LIMIT 100;", "limit timeline result size"},
+		{"GET key ALLTIME BEFORE VERSION:10;", "timeline before a version"},
+		{"GET key ALLTIME AFTER VERSION:10;", "timeline after a version"},
+		{"SEARCH EVENTS KEY:key NAME:SEND DESC PAGE:1;", "search indexed events with paging"},
+		{"SEARCH EVENTS KEY:key NAME:SEND WITH SAME I;", "expand linked events sharing the same business id"},
+		{"SEARCH EVENTS I:business-id;", "search by business idempotency key"},
+		{"ROLLBACK key VERSION:5;", "append rollback to a specific version"},
+		{"ROLLBACK key VERSION:LAST;", "rollback to the previous version"},
+		{"CHECK key ALLTIME;", "verify auth chain and manifests for one key"},
+		{"CHECK key ALLTIME LIMIT 1000;", "bounded history verification"},
+		{"VERIFY STORAGE;", "verify segment manifests and auth chain"},
+		{"COMPACT STORAGE;", "compact indexes, task buckets, and cold segments"},
+		{"SHOW METRICS;", "show runtime counters and latency percentiles"},
+		{"SHOW PERF;", "show metrics plus shard, segment, cache, backlog detail"},
+		{"CREATE RULE ...;", "create delayed auto transition rule"},
+		{"SHOW RULES;", "list all rules"},
+		{"SHOW RULE rule_id;", "show one rule"},
 		{"RUN SCHEDULER;", "process due tasks now"},
+		{"login", "authenticate and persist bearer token locally"},
+		{"logout", "remove locally cached bearer token"},
+		{"help / \\help", "show this command table"},
 		{"exit / quit", "safe exit"},
 	}
 	printTable("Command", "Description", rows)
