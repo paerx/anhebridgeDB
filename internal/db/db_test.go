@@ -1,9 +1,20 @@
 package db
 
 import (
+	"bufio"
+	bytespkg "bytes"
 	"encoding/json"
+	"fmt"
+	"hash/crc32"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"anhebridgedb/internal/config"
 )
 
 func TestTimelineAndDiff(t *testing.T) {
@@ -39,6 +50,9 @@ func TestTimelineAndDiff(t *testing.T) {
 	}
 	if timeline[1].Diff == nil {
 		t.Fatal("expected diff to be present")
+	}
+	if timeline[0].AuthTag == "" || timeline[1].AuthTag == "" {
+		t.Fatal("expected auth tags in timeline")
 	}
 }
 
@@ -176,6 +190,139 @@ func TestNumericDeltaAndBatchOps(t *testing.T) {
 	}
 }
 
+func TestIdempotencyKeyDeduplicatesAndConflicts(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	first, err := engine.SetWithIdempotencyKey("balance:1234", json.RawMessage(`-10`), "SEND", "diweuhasads")
+	if err != nil {
+		t.Fatalf("first idempotent set: %v", err)
+	}
+	second, err := engine.SetWithIdempotencyKey("balance:1234", json.RawMessage(`-10`), "SEND", "diweuhasads")
+	if err != nil {
+		t.Fatalf("second idempotent set: %v", err)
+	}
+	if first.EventID != second.EventID {
+		t.Fatalf("expected deduplicated event id, got %d and %d", first.EventID, second.EventID)
+	}
+
+	record, err := engine.Get("balance:1234")
+	if err != nil {
+		t.Fatalf("get balance: %v", err)
+	}
+	if string(record.Value) != `-10` {
+		t.Fatalf("unexpected deduplicated value: %s", record.Value)
+	}
+
+	if _, err := engine.SetWithIdempotencyKey("balance:1234", json.RawMessage(`-20`), "SEND", "diweuhasads"); err == nil {
+		t.Fatalf("expected idempotency conflict")
+	}
+}
+
+func TestSearchEventsUsesSecondaryIndexesAndPaging(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	for i := 0; i < 5; i++ {
+		key := "balance:1234"
+		if i%2 == 1 {
+			key = "balance:5678"
+		}
+		if _, err := engine.SetWithIdempotencyKey(key, json.RawMessage(strconv.Itoa(i+1)), "RECEIVED", fmt.Sprintf("idem-%d", i)); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+	}
+
+	page1, err := engine.SearchEvents(SearchOptions{
+		Key:       "balance:1234",
+		EventName: "RECEIVED",
+		Desc:      true,
+		Limit:     2,
+		Page:      1,
+	})
+	if err != nil {
+		t.Fatalf("search page1: %v", err)
+	}
+	if page1.Total != 3 || len(page1.Results) != 2 || !page1.HasMore {
+		t.Fatalf("unexpected page1: %+v", page1)
+	}
+	if page1.Results[0].Key != "balance:1234" || page1.Results[0].EventName != "RECEIVED" {
+		t.Fatalf("unexpected page1 first result: %+v", page1.Results[0])
+	}
+
+	page2, err := engine.SearchEvents(SearchOptions{
+		Key:       "balance:1234",
+		EventName: "RECEIVED",
+		Desc:      true,
+		Limit:     2,
+		Page:      2,
+	})
+	if err != nil {
+		t.Fatalf("search page2: %v", err)
+	}
+	if len(page2.Results) != 1 || page2.HasMore {
+		t.Fatalf("unexpected page2: %+v", page2)
+	}
+
+	idemPage, err := engine.SearchEvents(SearchOptions{IdempotencyKey: "idem-3", Limit: 10, Page: 1})
+	if err != nil {
+		t.Fatalf("search by idempotency key: %v", err)
+	}
+	if idemPage.Total != 1 || len(idemPage.Results) != 1 {
+		t.Fatalf("unexpected idempotency page: %+v", idemPage)
+	}
+	if idemPage.Results[0].IdempotencyKey != "idem-3" {
+		t.Fatalf("unexpected idempotency result: %+v", idemPage.Results[0])
+	}
+}
+
+func TestSearchEventsWithSameIChain(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.SetWithIdempotencyKey("balance:1234", json.RawMessage(`-10`), "SEND", "abcd"); err != nil {
+		t.Fatalf("seed send: %v", err)
+	}
+	if _, err := engine.SetWithIdempotencyKey("balance:5678", json.RawMessage(`10`), "RECEIVED", "abcd"); err != nil {
+		t.Fatalf("seed received: %v", err)
+	}
+	if _, err := engine.SetWithIdempotencyKey("balance:9999", json.RawMessage(`1`), "RECEIVED", "other"); err != nil {
+		t.Fatalf("seed unrelated: %v", err)
+	}
+
+	page, err := engine.SearchEvents(SearchOptions{
+		Key:       "balance:1234",
+		EventName: "SEND",
+		WithSameI: true,
+		Desc:      true,
+		Limit:     10,
+		Page:      1,
+	})
+	if err != nil {
+		t.Fatalf("search with same i: %v", err)
+	}
+	if page.Total != 2 || len(page.Results) != 2 {
+		t.Fatalf("unexpected same i page: %+v", page)
+	}
+	keys := []string{page.Results[0].Key, page.Results[1].Key}
+	sort.Strings(keys)
+	if keys[0] != "balance:1234" || keys[1] != "balance:5678" {
+		t.Fatalf("unexpected linked keys: %+v", keys)
+	}
+}
+
 func TestRuleSchedulerAndRecovery(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := Open(dir)
@@ -244,5 +391,214 @@ func TestRuleSchedulerAndRecovery(t *testing.T) {
 	}
 	if rule.ExecuteCount != 1 {
 		t.Fatalf("expected execute_count 1, got %d", rule.ExecuteCount)
+	}
+}
+
+func TestCheckAllTimeDetectsTamper(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+
+	if _, err := engine.Set("balance:123", json.RawMessage(`100`)); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	if _, err := engine.SetWithEventName("balance:123", json.RawMessage(`-10`), "WITHDRAW"); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("close engine: %v", err)
+	}
+
+	segmentPath := filepath.Join(dir, "log", "segment_000001.anhe")
+	fileBytes, err := os.ReadFile(segmentPath)
+	if err != nil {
+		t.Fatalf("read segment: %v", err)
+	}
+	scanner := bufio.NewScanner(bytespkg.NewReader(fileBytes))
+	var lines []string
+	mutatedIndex := -1
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var env struct {
+			CRC32 uint32          `json:"crc32"`
+			Data  json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(line, &env); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		text := strings.Replace(string(env.Data), `"new_value":90`, `"new_value":91`, 1)
+		encoded, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("encode envelope: %v", err)
+		}
+		lines = append(lines, string(encoded))
+		if text != string(env.Data) {
+			mutatedIndex = len(lines) - 1
+		}
+	}
+	if mutatedIndex < 0 {
+		t.Fatal("expected to mutate segment payload")
+	}
+	var env struct {
+		CRC32 uint32          `json:"crc32"`
+		Data  json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(lines[mutatedIndex]), &env); err != nil {
+		t.Fatalf("decode target envelope: %v", err)
+	}
+	env.Data = json.RawMessage(strings.Replace(string(env.Data), `"new_value":90`, `"new_value":91`, 1))
+	env.CRC32 = crc32.ChecksumIEEE(env.Data)
+	encoded, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("encode target envelope: %v", err)
+	}
+	lines[mutatedIndex] = string(encoded)
+	if err := os.WriteFile(segmentPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write mutated segment: %v", err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen engine: %v", err)
+	}
+	defer reopened.Close()
+
+	report, err := reopened.CheckAllTime("balance:123")
+	if err != nil {
+		t.Fatalf("check alltime: %v", err)
+	}
+	if report.OK {
+		t.Fatalf("expected tamper report, got ok")
+	}
+	if len(report.Issues) == 0 {
+		t.Fatalf("expected integrity issues")
+	}
+}
+
+func TestVerifyAndCompactStorage(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("user:1", json.RawMessage(`{"name":"tom"}`)); err != nil {
+		t.Fatalf("set user:1: %v", err)
+	}
+	if _, err := engine.Set("user:2", json.RawMessage(`{"name":"jack"}`)); err != nil {
+		t.Fatalf("set user:2: %v", err)
+	}
+
+	verify, err := engine.VerifyStorage()
+	if err != nil {
+		t.Fatalf("verify storage: %v", err)
+	}
+	if !verify.OK {
+		t.Fatalf("expected verify ok, got issues: %+v", verify.Issues)
+	}
+
+	report, err := engine.CompactStorage()
+	if err != nil {
+		t.Fatalf("compact storage: %v", err)
+	}
+	if !report.KeyIndexCompacted {
+		t.Fatalf("expected key index compacted")
+	}
+}
+
+func TestCompactStorageArchivesColdSegments(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := OpenWithConfig(dir, config.SegmentConfig{MaxRecords: 1}, config.Default().Performance, false)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("user:1", json.RawMessage(`{"name":"tom"}`)); err != nil {
+		t.Fatalf("set user:1: %v", err)
+	}
+	if _, err := engine.Set("user:2", json.RawMessage(`{"name":"jack"}`)); err != nil {
+		t.Fatalf("set user:2: %v", err)
+	}
+	if _, err := engine.Set("user:3", json.RawMessage(`{"name":"lucy"}`)); err != nil {
+		t.Fatalf("set user:3: %v", err)
+	}
+	if _, err := engine.Snapshot(); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	report, err := engine.CompactStorage()
+	if err != nil {
+		t.Fatalf("compact storage: %v", err)
+	}
+	if report.ArchivedSegments < 1 {
+		t.Fatalf("expected archived segments, got %d", report.ArchivedSegments)
+	}
+	if report.CompactedSegments < 1 {
+		t.Fatalf("expected compacted archive segments, got %d", report.CompactedSegments)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "log", "archive", "archive.manifest.json")); err != nil {
+		t.Fatalf("expected archive manifest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "log", "archive", "segment_900001.anhe")); err != nil {
+		t.Fatalf("expected compacted archive segment: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "log", "archive", "segment_000001.anhe")); !os.IsNotExist(err) {
+		t.Fatalf("expected old archived segment removed after compaction")
+	}
+	record, err := engine.Get("user:1")
+	if err != nil {
+		t.Fatalf("get after archive: %v", err)
+	}
+	if string(record.Value) != `{"name":"tom"}` {
+		t.Fatalf("unexpected archived read value: %s", record.Value)
+	}
+}
+
+func TestCompactStorageRewritesPositionIndexToCompactedArchive(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := OpenWithConfig(dir, config.SegmentConfig{MaxRecords: 1}, config.Default().Performance, false)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("balance:1", json.RawMessage(`1`)); err != nil {
+		t.Fatalf("set v1: %v", err)
+	}
+	if _, err := engine.Set("balance:1", json.RawMessage(`2`)); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if _, err := engine.Set("balance:1", json.RawMessage(`3`)); err != nil {
+		t.Fatalf("set v3: %v", err)
+	}
+	if _, err := engine.Snapshot(); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	report, err := engine.CompactStorage()
+	if err != nil {
+		t.Fatalf("compact storage: %v", err)
+	}
+	if report.CompactedSegments < 1 {
+		t.Fatalf("expected compacted archive segments")
+	}
+
+	ref, ok := engine.loadEventRef(1)
+	if !ok {
+		t.Fatalf("missing ref for event 1")
+	}
+	if ref.Segment != "segment_900001.anhe" {
+		t.Fatalf("expected compacted segment ref, got %s", ref.Segment)
+	}
+	record, err := engine.GetLast("balance:1", 2)
+	if err != nil {
+		t.Fatalf("get historical value from compacted archive: %v", err)
+	}
+	if string(record.Value) != "1" {
+		t.Fatalf("unexpected historical value: %s", record.Value)
 	}
 }

@@ -91,6 +91,14 @@ func TestExecuteCustomEventLastAndRollback(t *testing.T) {
 	if string(record.Value) != `90` {
 		t.Fatalf("unexpected rollback last value: %s", record.Value)
 	}
+
+	checkResults, err := exec.Execute(`CHECK balance:12 ALLTIME;`)
+	if err != nil {
+		t.Fatalf("check alltime dsl: %v", err)
+	}
+	if len(checkResults) != 1 {
+		t.Fatalf("expected single check result, got %d", len(checkResults))
+	}
 }
 
 func TestExecuteNumericDeltaAndBatchDSL(t *testing.T) {
@@ -115,5 +123,79 @@ func TestExecuteNumericDeltaAndBatchDSL(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected single batch result, got %d", len(results))
+	}
+
+	verifyResults, err := exec.Execute(`VERIFY STORAGE; COMPACT STORAGE;`)
+	if err != nil {
+		t.Fatalf("verify/compact dsl: %v", err)
+	}
+	if len(verifyResults) != 2 {
+		t.Fatalf("expected two maintenance results, got %d", len(verifyResults))
+	}
+
+	perfResults, err := exec.Execute(`SHOW METRICS; SHOW PERF;`)
+	if err != nil {
+		t.Fatalf("show metrics/perf dsl: %v", err)
+	}
+	if len(perfResults) != 2 {
+		t.Fatalf("expected two perf results, got %d", len(perfResults))
+	}
+}
+
+func TestExecuteSearchAndIdempotencyDSL(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	results, err := exec.Execute(`
+		SET balance:1234 -10 SEND i=diweuhasads;
+		SET balance:1234 -10 SEND i=diweuhasads;
+		SEARCH EVENTS KEY:balance:1234 NAME:send DESC LIMIT:10 PAGE:1;
+	`)
+	if err != nil {
+		t.Fatalf("execute search/idempotency dsl: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected three results, got %d", len(results))
+	}
+	searchPage, ok := results[2].(db.SearchResultPage)
+	if !ok {
+		t.Fatalf("expected search result page, got %T", results[2])
+	}
+	if searchPage.Total != 1 || len(searchPage.Results) != 1 {
+		t.Fatalf("unexpected search page: %+v", searchPage)
+	}
+	if searchPage.Results[0].IdempotencyKey != "diweuhasads" {
+		t.Fatalf("unexpected idempotency key in result: %+v", searchPage.Results[0])
+	}
+}
+
+func TestExecuteSearchWithSameIDSL(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	results, err := exec.Execute(`
+		ASET balance:1234 -10 SEND i=abcd, balance:9999 10 RECEIVED i=abcd;
+		SEARCH EVENTS KEY:balance:1234 NAME:SEND WITH SAME I DESC LIMIT:10 PAGE:1;
+	`)
+	if err != nil {
+		t.Fatalf("execute search same i dsl: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected two results, got %d", len(results))
+	}
+	searchPage, ok := results[1].(db.SearchResultPage)
+	if !ok {
+		t.Fatalf("expected search result page, got %T", results[1])
+	}
+	if searchPage.Total != 2 || len(searchPage.Results) != 2 {
+		t.Fatalf("unexpected search page: %+v", searchPage)
 	}
 }
