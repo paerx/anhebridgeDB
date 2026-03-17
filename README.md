@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  This project is licensed under the Apache License 2.0.
+</p>
+
+<p align="center">
   <strong>Timeline. Diff. Rollback. Auto-transition.</strong>
 </p>
 
@@ -762,4 +766,3 @@ flowchart LR
   G -- "No" --> H["Skip Task"]
   G -- "Yes" --> I["Append AUTO_TRANSITION Event"]
 ```
-
