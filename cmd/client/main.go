@@ -87,15 +87,27 @@ var completions = []string{
 
 func main() {
 	var (
-		addr    = flag.String("addr", "http://127.0.0.1:8080", "server address")
-		execute = flag.String("e", "", "execute DSL and exit")
-		timeout = flag.Duration("timeout", 10*time.Second, "request timeout")
+		addr     = flag.String("addr", "http://127.0.0.1:8080", "server address")
+		execute  = flag.String("e", "", "execute DSL and exit")
+		timeout  = flag.Duration("timeout", 10*time.Second, "request timeout")
+		username = flag.String("u", "", "username for auto login")
+		password = flag.String("a", "", "password for auto login")
 	)
 	flag.Parse()
 
 	client := &http.Client{Timeout: *timeout}
 
 	store, _ := loadAuthState()
+	if strings.TrimSpace(*username) != "" || strings.TrimSpace(*password) != "" {
+		if strings.TrimSpace(*username) == "" || strings.TrimSpace(*password) == "" {
+			fmt.Fprintln(os.Stderr, "both -u and -a are required for auto login")
+			os.Exit(1)
+		}
+		if err := loginWithCredentials(client, store, *addr, strings.TrimSpace(*username), *password); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 	switch {
 	case strings.TrimSpace(*execute) != "":
 		if err := runOnce(store, *addr, *execute); err != nil {
@@ -239,6 +251,10 @@ func loginFlow(client *http.Client, store *authState, addr string) error {
 	if err != nil {
 		return err
 	}
+	return loginWithCredentials(client, store, addr, username, password)
+}
+
+func loginWithCredentials(client *http.Client, store *authState, addr, username, password string) error {
 	body, err := json.Marshal(map[string]string{
 		"username": username,
 		"password": password,

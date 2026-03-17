@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -130,7 +131,7 @@ func (e *wsExecutor) connect() error {
 	if err != nil {
 		return err
 	}
-	conn, rw, err := dialWebSocket(wsURL)
+	conn, rw, err := dialWebSocket(wsURL, e.token)
 	if err != nil {
 		return err
 	}
@@ -168,13 +169,10 @@ func wsURLForAddr(addr, token string) (string, error) {
 	return u.String(), nil
 }
 
-func dialWebSocket(rawURL string) (net.Conn, *bufio.ReadWriter, error) {
+func dialWebSocket(rawURL, token string) (net.Conn, *bufio.ReadWriter, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, nil, err
-	}
-	if u.Scheme == "wss" {
-		return nil, nil, errors.New("wss is not supported by this CLI build")
 	}
 	host := u.Host
 	if !strings.Contains(host, ":") {
@@ -184,7 +182,15 @@ func dialWebSocket(rawURL string) (net.Conn, *bufio.ReadWriter, error) {
 			host += ":80"
 		}
 	}
-	conn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	var conn net.Conn
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	switch u.Scheme {
+	case "wss":
+		tlsCfg := &tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12}
+		conn, err = tls.DialWithDialer(dialer, "tcp", host, tlsCfg)
+	default:
+		conn, err = dialer.Dial("tcp", host)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,7 +205,11 @@ func dialWebSocket(rawURL string) (net.Conn, *bufio.ReadWriter, error) {
 	if path == "" {
 		path = "/ws"
 	}
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n", path, u.Host, key)
+	authHeader := ""
+	if strings.TrimSpace(token) != "" {
+		authHeader = "Authorization: Bearer " + strings.TrimSpace(token) + "\r\n"
+	}
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n%s\r\n", path, u.Host, key, authHeader)
 	if _, err := rw.WriteString(req); err != nil {
 		_ = conn.Close()
 		return nil, nil, err
