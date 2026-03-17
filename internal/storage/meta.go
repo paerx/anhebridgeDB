@@ -36,12 +36,12 @@ type Task struct {
 	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
 }
 
-type FastEntry struct {
-	Key        string    `json:"key"`
-	Value      []byte    `json:"value"`
-	Version    uint64    `json:"version"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	AccessedAt time.Time `json:"accessed_at"`
+type TaskBucketMeta struct {
+	BucketTS      time.Time `json:"bucket_ts"`
+	Path          string    `json:"path"`
+	Total         int       `json:"total"`
+	Pending       int       `json:"pending"`
+	OldestPending *time.Time `json:"oldest_pending,omitempty"`
 }
 
 func RulesPath(dir string) string {
@@ -73,6 +73,40 @@ func LoadAllTasks(dir string) ([]Task, error) {
 	return tasks, nil
 }
 
+func LoadTaskBucketMeta(dir string) (map[time.Time]TaskBucketMeta, error) {
+	buckets, err := listTaskBucketPaths(dir)
+	if err != nil {
+		return nil, err
+	}
+	metas := map[time.Time]TaskBucketMeta{}
+	for _, path := range buckets {
+		bucket, err := parseBucketTime(filepath.Base(path))
+		if err != nil {
+			return nil, err
+		}
+		var tasks []Task
+		if err := LoadJSON(path, &tasks); err != nil {
+			return nil, err
+		}
+		meta := TaskBucketMeta{
+			BucketTS: bucket,
+			Path:     path,
+			Total:    len(tasks),
+		}
+		for _, task := range tasks {
+			if task.Status == "pending" {
+				meta.Pending++
+				if meta.OldestPending == nil || task.CreatedAt.Before(*meta.OldestPending) {
+					ts := task.CreatedAt
+					meta.OldestPending = &ts
+				}
+			}
+		}
+		metas[bucket] = meta
+	}
+	return metas, nil
+}
+
 func SaveTaskBucket(dir string, bucket time.Time, tasks []Task) error {
 	path := TaskBucketPath(dir, bucket)
 	if len(tasks) == 0 {
@@ -85,6 +119,23 @@ func SaveTaskBucket(dir string, bucket time.Time, tasks []Task) error {
 		return tasks[i].ID < tasks[j].ID
 	})
 	return SaveJSON(path, tasks)
+}
+
+func LoadTaskBucket(dir string, bucket time.Time) ([]Task, error) {
+	var tasks []Task
+	if err := LoadJSON(TaskBucketPath(dir, bucket), &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func AppendTaskBucket(dir string, bucket time.Time, task Task) error {
+	tasks, err := LoadTaskBucket(dir, bucket)
+	if err != nil {
+		return err
+	}
+	tasks = append(tasks, task)
+	return SaveTaskBucket(dir, bucket, tasks)
 }
 
 func DueTaskBucketPaths(dir string, now time.Time) ([]string, error) {

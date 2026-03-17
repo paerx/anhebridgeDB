@@ -677,18 +677,36 @@ func (e *Engine) Get(key string) (Record, error) {
 	defer observe(e.metrics.get, start)
 	unlock := e.rlockKey(key)
 	defer unlock()
-	return e.getLocked(key)
+	return e.resolveRecordForRead(key, readContext{mode: readModeLatest})
+}
+
+func (e *Engine) GetRaw(key string) (Record, error) {
+	start := time.Now()
+	defer observe(e.metrics.get, start)
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, readContext{mode: readModeLatest, raw: true})
 }
 
 func (e *Engine) BatchGet(keys []string) []BatchGetItem {
 	start := time.Now()
 	defer observe(e.metrics.get, start)
+	return e.batchGetWithOptions(keys, false)
+}
+
+func (e *Engine) BatchGetRaw(keys []string) []BatchGetItem {
+	start := time.Now()
+	defer observe(e.metrics.get, start)
+	return e.batchGetWithOptions(keys, true)
+}
+
+func (e *Engine) batchGetWithOptions(keys []string, raw bool) []BatchGetItem {
 	unlock := e.rlockKeys(keys)
 	defer unlock()
 
 	items := make([]BatchGetItem, 0, len(keys))
 	for _, key := range keys {
-		record, err := e.getLocked(key)
+		record, err := e.resolveRecordForRead(key, readContext{mode: readModeLatest, raw: raw})
 		if err != nil {
 			items = append(items, BatchGetItem{Key: key, Found: false})
 			continue
@@ -710,61 +728,27 @@ func (e *Engine) GetAt(key string, at time.Time) (Record, error) {
 	defer observe(e.metrics.getAt, start)
 	unlock := e.rlockKey(key)
 	defer unlock()
+	return e.resolveRecordForRead(key, readContext{mode: readModeAt, at: at.UTC()})
+}
 
-	version := e.loadLatestVersion(key)
-	for version != 0 {
-		ref, ok := e.loadEventRef(version)
-		if !ok {
-			break
-		}
-		if ref.Timestamp.After(at) {
-			version = ref.PrevEventID
-			continue
-		}
-		event, ok := e.loadEventLocked(version)
-		if !ok {
-			break
-		}
-		if event.Operation == "DELETE" || (event.Operation == "ROLLBACK" && len(event.NewValue) == 0) {
-			return Record{}, ErrNotFound
-		}
-		return Record{Value: clone(event.NewValue), Version: event.EventID, UpdatedAt: event.Timestamp}, nil
-	}
-
-	if !e.snapshotTime.IsZero() && !at.Before(e.snapshotTime) {
-		if record, ok := e.loadState(key); ok && !record.UpdatedAt.After(at) {
-			return cloneRecord(record), nil
-		}
-	}
-	return Record{}, ErrNotFound
+func (e *Engine) GetAtRaw(key string, at time.Time) (Record, error) {
+	start := time.Now()
+	defer observe(e.metrics.getAt, start)
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, readContext{mode: readModeAt, at: at.UTC(), raw: true})
 }
 
 func (e *Engine) GetLast(key string, steps int) (Record, error) {
 	unlock := e.rlockKey(key)
 	defer unlock()
+	return e.resolveRecordForRead(key, readContext{mode: readModeLast, steps: steps})
+}
 
-	if steps < 1 {
-		steps = 1
-	}
-	version := e.loadLatestVersion(key)
-	if version == 0 {
-		return Record{}, ErrNotFound
-	}
-	for i := 0; i < steps; i++ {
-		event, ok := e.loadEventLocked(version)
-		if !ok || event.PrevVersionOffset == 0 {
-			return Record{}, ErrNotFound
-		}
-		version = event.PrevVersionOffset
-	}
-	event, ok := e.loadEventLocked(version)
-	if !ok {
-		return Record{}, ErrNotFound
-	}
-	if event.Operation == "DELETE" || (event.Operation == "ROLLBACK" && len(event.NewValue) == 0) {
-		return Record{}, ErrNotFound
-	}
-	return Record{Value: clone(event.NewValue), Version: event.EventID, UpdatedAt: event.Timestamp}, nil
+func (e *Engine) GetLastRaw(key string, steps int) (Record, error) {
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, readContext{mode: readModeLast, steps: steps, raw: true})
 }
 
 func (e *Engine) Timeline(key string, withDiff bool) ([]TimelineEntry, error) {
@@ -1598,6 +1582,9 @@ func (e *Engine) resolveValueLocked(key string, value json.RawMessage, eventName
 	current, exists := e.loadState(key)
 	if !exists {
 		return normalizeNumber(delta)
+	}
+	if hasSuperReference(current.Value) {
+		return nil, ErrSuperValueReadOnly
 	}
 	base, ok := parseNumericRaw(current.Value)
 	if !ok {

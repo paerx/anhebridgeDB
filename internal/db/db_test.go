@@ -4,6 +4,7 @@ import (
 	"bufio"
 	bytespkg "bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -220,6 +221,72 @@ func TestIdempotencyKeyDeduplicatesAndConflicts(t *testing.T) {
 
 	if _, err := engine.SetWithIdempotencyKey("balance:1234", json.RawMessage(`-20`), "SEND", "diweuhasads"); err == nil {
 		t.Fatalf("expected idempotency conflict")
+	}
+}
+
+func TestSuperValueExpandRawAndReadOnlyProtection(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("uid-hksn10", json.RawMessage(`{"uid":"uid-hksn10","owner":"0xabc","activated":true}`)); err != nil {
+		t.Fatalf("seed uid-hksn10: %v", err)
+	}
+	if _, err := engine.Set("uid-asan10", json.RawMessage(`{"uid":"uid-asan10","owner":"0xdef","activated":false}`)); err != nil {
+		t.Fatalf("seed uid-asan10: %v", err)
+	}
+	if _, err := engine.Set("usersVape", json.RawMessage(`["*uid-hksn10","*uid-asan10"]`)); err != nil {
+		t.Fatalf("seed usersVape: %v", err)
+	}
+
+	raw, err := engine.GetRaw("usersVape")
+	if err != nil {
+		t.Fatalf("get raw usersVape: %v", err)
+	}
+	if string(raw.Value) != `["*uid-hksn10","*uid-asan10"]` {
+		t.Fatalf("unexpected raw value: %s", raw.Value)
+	}
+
+	expanded, err := engine.Get("usersVape")
+	if err != nil {
+		t.Fatalf("get expanded usersVape: %v", err)
+	}
+	var expandedArr []map[string]any
+	if err := json.Unmarshal(expanded.Value, &expandedArr); err != nil {
+		t.Fatalf("decode expanded value: %v", err)
+	}
+	if len(expandedArr) != 2 {
+		t.Fatalf("unexpected expanded refs len: %d", len(expandedArr))
+	}
+	if expandedArr[0]["key"] != "uid-hksn10" || expandedArr[1]["key"] != "uid-asan10" {
+		t.Fatalf("unexpected expanded refs: %+v", expandedArr)
+	}
+
+	if _, err := engine.SetWithEventName("usersVape", json.RawMessage(`-1`), "WITHDRAW"); !errors.Is(err, ErrSuperValueReadOnly) {
+		t.Fatalf("expected super value read-only error, got: %v", err)
+	}
+}
+
+func TestSuperValueCycleDetection(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("A", json.RawMessage(`"*B"`)); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	if _, err := engine.Set("B", json.RawMessage(`"*A"`)); err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+
+	if _, err := engine.Get("A"); !errors.Is(err, ErrSuperValueCycleDetected) {
+		t.Fatalf("expected cycle error, got: %v", err)
 	}
 }
 

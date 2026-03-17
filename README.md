@@ -103,7 +103,9 @@ DELETE key;
 
 ```sql
 GET key;
+GET key RAW;
 AGET key1 key2 key3;
+AGET key1 key2 key3 RAW;
 GET key AT '2026-03-15T04:00:00Z';
 GET key LAST;
 GET key LAST -1 -1;
@@ -111,6 +113,30 @@ GET key ALLTIME;
 GET key ALLTIME WITH DIFF;
 GET key ALLTIME LIMIT 100 BEFORE VERSION:10 AFTER VERSION:5;
 ```
+
+### Super Value (Read-Only View)
+
+`super value` means a string that starts with `*` and points to another key.
+
+Example:
+
+```sql
+SET uid-hksn10 {"uid":"uid-hksn10","owner":"0xabc","activated":true};
+SET uid-asan10 {"uid":"uid-asan10","owner":"0xdef","activated":false};
+SET usersVape ["*uid-hksn10","*uid-asan10"];
+GET usersVape;
+GET usersVape RAW;
+AGET usersVape uid-hksn10 RAW;
+```
+
+Behavior:
+
+- `GET/AGET` expands super values by default.
+- `GET RAW` and `AGET ... RAW` return stored raw value without expansion.
+- expansion is read-only: no write-through to referenced keys.
+- circular references are rejected with `super_value_cycle_detected`.
+- depth/node/fanout are bounded by performance config.
+- missing referenced key is returned as `found=false` entry, not a server crash.
 
 ### Search Commands
 
@@ -209,7 +235,10 @@ Performance controls:
     "scheduler_workers": 4,
     "metrics_sample_interval_seconds": 10,
     "snapshot_batch_size": 10000,
-    "timeline_default_limit": 1000
+    "timeline_default_limit": 1000,
+    "super_value_max_depth": 5,
+    "super_value_max_fanout": 200,
+    "super_value_max_nodes": 1000
   }
 }
 ```
@@ -733,5 +762,4 @@ flowchart LR
   G -- "No" --> H["Skip Task"]
   G -- "Yes" --> I["Append AUTO_TRANSITION Event"]
 ```
-
 

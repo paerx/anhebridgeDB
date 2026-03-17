@@ -26,10 +26,6 @@ type KeyIndexEntry struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-type FastStore struct {
-	path string
-}
-
 type PositionIndex struct {
 	file *os.File
 }
@@ -39,7 +35,15 @@ func PositionIndexPath(dir string) string {
 }
 
 func KeyIndexPath(dir string) string {
-	return filepath.Join(dir, "index", "latest.anhe")
+	return KeyIndexCurrentPath(dir)
+}
+
+func KeyIndexCurrentPath(dir string) string {
+	return filepath.Join(dir, "index", "latest.snapshot.anhe")
+}
+
+func KeyIndexDeltaPath(dir string) string {
+	return filepath.Join(dir, "index", "latest.delta.anhe")
 }
 
 func OpenPositionIndex(dir string) (*PositionIndex, error) {
@@ -80,6 +84,35 @@ func (p *PositionIndex) Close() error {
 	return p.file.Close()
 }
 
+func SavePositionIndex(dir string, refs map[uint64]EventRef) error {
+	path := PositionIndexPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	list := make([]EventRef, 0, len(refs))
+	for _, ref := range refs {
+		list = append(list, ref)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].EventID < list[j].EventID
+	})
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for _, ref := range list {
+		bytes, err := json.Marshal(ref)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write(append(bytes, '\n')); err != nil {
+			return err
+		}
+	}
+	return file.Sync()
+}
+
 func LoadPositionIndex(dir string) (map[uint64]EventRef, error) {
 	path := PositionIndexPath(dir)
 	file, err := os.Open(path)
@@ -103,7 +136,7 @@ func LoadPositionIndex(dir string) (map[uint64]EventRef, error) {
 	return index, scanner.Err()
 }
 
-func SaveKeyIndex(dir string, entries map[string]KeyIndexEntry) error {
+func SaveKeyIndexSnapshot(dir string, entries map[string]KeyIndexEntry) error {
 	list := make([]KeyIndexEntry, 0, len(entries))
 	for _, entry := range entries {
 		list = append(list, entry)
@@ -111,17 +144,68 @@ func SaveKeyIndex(dir string, entries map[string]KeyIndexEntry) error {
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].Key < list[j].Key
 	})
-	return SaveJSON(KeyIndexPath(dir), list)
+	return SaveJSON(KeyIndexCurrentPath(dir), list)
+}
+
+func AppendKeyIndexDelta(dir string, entry KeyIndexEntry) error {
+	path := KeyIndexDeltaPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	bytes, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(append(bytes, '\n')); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func CompactKeyIndex(dir string, entries map[string]KeyIndexEntry) error {
+	if err := SaveKeyIndexSnapshot(dir, entries); err != nil {
+		return err
+	}
+	path := KeyIndexDeltaPath(dir)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func LoadKeyIndex(dir string) (map[string]KeyIndexEntry, error) {
 	var list []KeyIndexEntry
-	if err := LoadJSON(KeyIndexPath(dir), &list); err != nil {
+	if err := LoadJSON(KeyIndexCurrentPath(dir), &list); err != nil {
 		return nil, err
 	}
 	index := map[string]KeyIndexEntry{}
 	for _, entry := range list {
 		index[entry.Key] = entry
+	}
+	deltaPath := KeyIndexDeltaPath(dir)
+	file, err := os.Open(deltaPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return index, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var entry KeyIndexEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return nil, err
+		}
+		index[entry.Key] = entry
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return index, nil
 }
@@ -129,6 +213,9 @@ func LoadKeyIndex(dir string) (map[string]KeyIndexEntry, error) {
 func ReadEventAt(dir string, ref EventRef) (Event, error) {
 	path := filepath.Join(dir, "log", ref.Segment)
 	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, err = os.Open(ArchiveSegmentPath(filepath.Join(dir, "log"), ref.Segment))
+	}
 	if err != nil {
 		return Event{}, err
 	}
@@ -144,25 +231,76 @@ func ReadEventAt(dir string, ref EventRef) (Event, error) {
 	if len(buf) > 0 && buf[len(buf)-1] == '\n' {
 		buf = buf[:len(buf)-1]
 	}
-	var event Event
-	if err := json.Unmarshal(buf, &event); err != nil {
-		return Event{}, err
+	return unmarshalRecord(buf)
+}
+
+func LastPositionIndexEventID(dir string) (uint64, error) {
+	path := PositionIndexPath(dir)
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
 	}
-	return event, nil
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	var last uint64
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var ref EventRef
+		if err := json.Unmarshal(scanner.Bytes(), &ref); err != nil {
+			return 0, err
+		}
+		if ref.EventID > last {
+			last = ref.EventID
+		}
+	}
+	return last, scanner.Err()
 }
 
-func OpenFastStore(dir string) *FastStore {
-	return &FastStore{path: filepath.Join(dir, "log", "fast.anhe")}
-}
-
-func (f *FastStore) Load() ([]FastEntry, error) {
-	var entries []FastEntry
-	if err := LoadJSON(f.path, &entries); err != nil {
+func RebuildPositionIndex(dir string) (map[uint64]EventRef, error) {
+	logDir := filepath.Join(dir, "log")
+	paths, err := listAllSegmentPaths(logDir)
+	if err != nil {
 		return nil, err
 	}
-	return entries, nil
-}
-
-func (f *FastStore) Save(entries []FastEntry) error {
-	return SaveJSON(f.path, entries)
+	refs := map[uint64]EventRef{}
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		scanner := bufio.NewScanner(file)
+		var offset int64
+		segment := filepath.Base(path)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			size := len(line) + 1
+			event, err := unmarshalRecord(line)
+			if err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			refs[event.EventID] = EventRef{
+				EventID:     event.EventID,
+				Key:         event.Key,
+				Timestamp:   event.Timestamp,
+				Segment:     segment,
+				Offset:      offset,
+				Size:        size,
+				PrevEventID: event.PrevVersionOffset,
+			}
+			offset += int64(size)
+		}
+		if err := scanner.Err(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		_ = file.Close()
+	}
+	if err := SavePositionIndex(dir, refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }

@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -26,16 +28,22 @@ func SnapshotPath(dir string) string {
 
 func LoadSnapshot(dir string) (Snapshot, error) {
 	path := SnapshotPath(dir)
-	bytes, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Snapshot{}, nil
 	}
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if len(data) == 0 || len(bytes.TrimSpace(data)) == 0 {
+		return Snapshot{State: map[string]SnapshotRecord{}}, nil
+	}
 
 	var snapshot Snapshot
-	if err := json.Unmarshal(bytes, &snapshot); err != nil {
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		if errors.Is(err, io.EOF) {
+			return Snapshot{State: map[string]SnapshotRecord{}}, nil
+		}
 		return Snapshot{}, err
 	}
 	if snapshot.State == nil {

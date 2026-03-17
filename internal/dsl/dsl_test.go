@@ -1,6 +1,7 @@
 package dsl
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -133,6 +134,14 @@ func TestExecuteNumericDeltaAndBatchDSL(t *testing.T) {
 		t.Fatalf("expected two maintenance results, got %d", len(verifyResults))
 	}
 
+	snapshotResults, err := exec.Execute(`SNAPSHOT;`)
+	if err != nil {
+		t.Fatalf("snapshot dsl: %v", err)
+	}
+	if len(snapshotResults) != 1 {
+		t.Fatalf("expected one snapshot result, got %d", len(snapshotResults))
+	}
+
 	perfResults, err := exec.Execute(`SHOW METRICS; SHOW PERF;`)
 	if err != nil {
 		t.Fatalf("show metrics/perf dsl: %v", err)
@@ -197,5 +206,50 @@ func TestExecuteSearchWithSameIDSL(t *testing.T) {
 	}
 	if searchPage.Total != 2 || len(searchPage.Results) != 2 {
 		t.Fatalf("unexpected search page: %+v", searchPage)
+	}
+}
+
+func TestExecuteGetRawAndSuperValueExpansion(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	if _, err := exec.Execute(`
+		SET uid-hksn10 {"uid":"uid-hksn10","owner":"0xabc","activated":true};
+		SET uid-asan10 {"uid":"uid-asan10","owner":"0xdef","activated":false};
+		SET usersVape ["*uid-hksn10","*uid-asan10"];
+	`); err != nil {
+		t.Fatalf("seed super values: %v", err)
+	}
+
+	rawResults, err := exec.Execute(`GET usersVape RAW;`)
+	if err != nil {
+		t.Fatalf("get raw: %v", err)
+	}
+	rawRecord, ok := rawResults[0].(db.Record)
+	if !ok {
+		t.Fatalf("expected db.Record for raw result, got %T", rawResults[0])
+	}
+	if string(rawRecord.Value) != `["*uid-hksn10","*uid-asan10"]` {
+		t.Fatalf("unexpected raw value: %s", rawRecord.Value)
+	}
+
+	expandedResults, err := exec.Execute(`GET usersVape;`)
+	if err != nil {
+		t.Fatalf("get expanded: %v", err)
+	}
+	expandedRecord, ok := expandedResults[0].(db.Record)
+	if !ok {
+		t.Fatalf("expected db.Record for expanded result, got %T", expandedResults[0])
+	}
+	var expanded []map[string]any
+	if err := json.Unmarshal(expandedRecord.Value, &expanded); err != nil {
+		t.Fatalf("decode expanded value: %v", err)
+	}
+	if len(expanded) != 2 {
+		t.Fatalf("unexpected expanded refs count: %d", len(expanded))
 	}
 }

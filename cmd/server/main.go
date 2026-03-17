@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"anhebridgedb/internal/auth"
 	"anhebridgedb/internal/config"
 	"anhebridgedb/internal/db"
 	"anhebridgedb/internal/httpapi"
@@ -29,16 +30,20 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	engine, err := db.OpenWithConfig(*dataDir, cfg.Storage.Segment)
+	engine, err := db.OpenWithConfig(*dataDir, cfg.Storage.Segment, cfg.Performance, cfg.Storage.StrictRecovery)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
 	defer engine.Close()
-	engine.StartScheduler(context.Background(), *schedulerInterval)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	engine.StartScheduler(runCtx, *schedulerInterval)
+	engine.StartMetricsSampler(runCtx, time.Duration(cfg.Performance.MetricsSampleIntervalSeconds)*time.Second)
+	authManager := auth.New(cfg.Auth)
 
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.New(engine).Handler(),
+		Handler:           httpapi.New(engine, authManager).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -55,6 +60,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	cancelRun()
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
