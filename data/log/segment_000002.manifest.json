@@ -1,12 +1,12 @@
 {
   "segment": "segment_000002.anhe",
   "first_event_id": 22966,
-  "last_event_id": 23788,
-  "record_count": 823,
-  "size_bytes": 296668,
+  "last_event_id": 23800,
+  "record_count": 835,
+  "size_bytes": 305002,
   "first_timestamp": "2026-03-15T03:58:06.931624Z",
-  "last_timestamp": "2026-03-17T05:21:01.23152Z",
-  "last_auth_tag": "Nw4hRx_zeJzNozgSRw1Go5GQAY41GSzk7NiH9LS8_xA",
-  "manifest_auth": "V4PU5zwVz8cyt6xZOqB6QQxZWo6uiYIKya3Fg6Uxsq0",
-  "updated_at": "2026-03-17T05:21:01.248421Z"
+  "last_timestamp": "2026-03-17T06:08:33.807604Z",
+  "last_auth_tag": "xJF9AtfkOcsYdHwllK4L5ql73iVyt17GfD2dIvY6shk",
+  "manifest_auth": "b2MshhRGeImX60QMtOtnsTkkqZKaFwQX0tMhukQEHRo",
+  "updated_at": "2026-03-17T06:08:33.8238Z"
 }
