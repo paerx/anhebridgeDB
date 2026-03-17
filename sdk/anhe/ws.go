@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -216,14 +217,26 @@ func dialWebSocket(rawURL string) (net.Conn, *bufio.ReadWriter, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if u.Scheme == "wss" {
-		return nil, nil, errors.New("wss is not supported in this sdk build")
-	}
 	host := u.Host
 	if !strings.Contains(host, ":") {
-		host += ":80"
+		if u.Scheme == "wss" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
 	}
-	conn, err := net.DialTimeout("tcp", host, 10*time.Second)
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	var conn net.Conn
+	switch u.Scheme {
+	case "wss":
+		tlsCfg := &tls.Config{
+			ServerName: u.Hostname(),
+			MinVersion: tls.VersionTLS12,
+		}
+		conn, err = tls.DialWithDialer(dialer, "tcp", host, tlsCfg)
+	default:
+		conn, err = dialer.Dial("tcp", host)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
