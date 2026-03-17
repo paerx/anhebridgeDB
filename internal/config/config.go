@@ -7,11 +7,39 @@ import (
 )
 
 type Config struct {
-	Storage StorageConfig `json:"storage"`
+	Auth        AuthConfig        `json:"auth"`
+	Storage     StorageConfig     `json:"storage"`
+	Performance PerformanceConfig `json:"performance"`
+}
+
+type AuthConfig struct {
+	Enabled         bool       `json:"enabled"`
+	Secret          string     `json:"secret,omitempty"`
+	TokenTTLMinutes int        `json:"token_ttl_minutes"`
+	Users           []AuthUser `json:"users"`
+}
+
+type AuthUser struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type StorageConfig struct {
-	Segment SegmentConfig `json:"segment"`
+	Segment        SegmentConfig `json:"segment"`
+	StrictRecovery bool          `json:"strict_recovery"`
+}
+
+type PerformanceConfig struct {
+	EventCacheMaxItems           int `json:"event_cache_max_items"`
+	EventCacheMaxBytes           int `json:"event_cache_max_bytes"`
+	KeyIndexCompactOps           int `json:"key_index_compact_ops"`
+	SchedulerWorkers             int `json:"scheduler_workers"`
+	MetricsSampleIntervalSeconds int `json:"metrics_sample_interval_seconds"`
+	SnapshotBatchSize            int `json:"snapshot_batch_size"`
+	TimelineDefaultLimit         int `json:"timeline_default_limit"`
+	SuperValueMaxDepth           int `json:"super_value_max_depth"`
+	SuperValueMaxFanout          int `json:"super_value_max_fanout"`
+	SuperValueMaxNodes           int `json:"super_value_max_nodes"`
 }
 
 type SegmentConfig struct {
@@ -21,11 +49,28 @@ type SegmentConfig struct {
 
 func Default() Config {
 	return Config{
+		Auth: AuthConfig{
+			Enabled:         false,
+			TokenTTLMinutes: 1440,
+			Users:           []AuthUser{},
+		},
 		Storage: StorageConfig{
 			Segment: SegmentConfig{
 				MaxBytes:   64 * 1024 * 1024,
 				MaxRecords: 30000,
 			},
+		},
+		Performance: PerformanceConfig{
+			EventCacheMaxItems:           50000,
+			EventCacheMaxBytes:           128 * 1024 * 1024,
+			KeyIndexCompactOps:           10000,
+			SchedulerWorkers:             4,
+			MetricsSampleIntervalSeconds: 10,
+			SnapshotBatchSize:            10000,
+			TimelineDefaultLimit:         1000,
+			SuperValueMaxDepth:           5,
+			SuperValueMaxFanout:          200,
+			SuperValueMaxNodes:           1000,
 		},
 	}
 }
@@ -50,6 +95,39 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Storage.Segment.MaxRecords < 0 {
 		cfg.Storage.Segment.MaxRecords = 0
+	}
+	if cfg.Performance.EventCacheMaxItems <= 0 {
+		cfg.Performance.EventCacheMaxItems = Default().Performance.EventCacheMaxItems
+	}
+	if cfg.Performance.EventCacheMaxBytes <= 0 {
+		cfg.Performance.EventCacheMaxBytes = Default().Performance.EventCacheMaxBytes
+	}
+	if cfg.Performance.KeyIndexCompactOps <= 0 {
+		cfg.Performance.KeyIndexCompactOps = Default().Performance.KeyIndexCompactOps
+	}
+	if cfg.Performance.SchedulerWorkers <= 0 {
+		cfg.Performance.SchedulerWorkers = Default().Performance.SchedulerWorkers
+	}
+	if cfg.Performance.MetricsSampleIntervalSeconds < 10 {
+		cfg.Performance.MetricsSampleIntervalSeconds = Default().Performance.MetricsSampleIntervalSeconds
+	}
+	if cfg.Performance.SnapshotBatchSize <= 0 {
+		cfg.Performance.SnapshotBatchSize = Default().Performance.SnapshotBatchSize
+	}
+	if cfg.Performance.TimelineDefaultLimit <= 0 {
+		cfg.Performance.TimelineDefaultLimit = Default().Performance.TimelineDefaultLimit
+	}
+	if cfg.Performance.SuperValueMaxDepth <= 0 {
+		cfg.Performance.SuperValueMaxDepth = Default().Performance.SuperValueMaxDepth
+	}
+	if cfg.Performance.SuperValueMaxFanout <= 0 {
+		cfg.Performance.SuperValueMaxFanout = Default().Performance.SuperValueMaxFanout
+	}
+	if cfg.Performance.SuperValueMaxNodes <= 0 {
+		cfg.Performance.SuperValueMaxNodes = Default().Performance.SuperValueMaxNodes
+	}
+	if cfg.Auth.TokenTTLMinutes <= 0 {
+		cfg.Auth.TokenTTLMinutes = Default().Auth.TokenTTLMinutes
 	}
 	return cfg, nil
 }

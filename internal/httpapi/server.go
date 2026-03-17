@@ -3,24 +3,30 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"anhebridgedb/internal/auth"
 	"anhebridgedb/internal/db"
 	"anhebridgedb/internal/dsl"
+	"anhebridgedb/internal/storage"
 )
 
 type Server struct {
 	engine *db.Engine
 	dsl    *dsl.Executor
+	auth   *auth.Manager
 	mux    *http.ServeMux
 }
 
-func New(engine *db.Engine) *Server {
+func New(engine *db.Engine, authManager *auth.Manager) *Server {
 	server := &Server{
 		engine: engine,
 		dsl:    dsl.New(engine),
+		auth:   authManager,
 		mux:    http.NewServeMux(),
 	}
 	server.routes()
@@ -33,21 +39,144 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
-	s.mux.HandleFunc("/stats", s.handleStats)
-	s.mux.HandleFunc("/snapshot", s.handleSnapshot)
-	s.mux.HandleFunc("/dsl", s.handleDSL)
-	s.mux.HandleFunc("/rules", s.handleRules)
-	s.mux.HandleFunc("/rules/", s.handleRule)
-	s.mux.HandleFunc("/tasks", s.handleTasks)
-	s.mux.HandleFunc("/kv/", s.handleKV)
+	s.mux.HandleFunc("/auth/login", s.handleLogin)
+	s.mux.Handle("/metrics/history", s.withAuth(http.HandlerFunc(s.handleMetricsHistory)))
+	s.mux.Handle("/stats", s.withAuth(http.HandlerFunc(s.handleStats)))
+	s.mux.Handle("/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
+	s.mux.Handle("/debug/perf", s.withAuth(http.HandlerFunc(s.handleDebugPerf)))
+	s.mux.Handle("/ws", http.HandlerFunc(s.handleWS))
+	s.mux.Handle("/snapshot", s.withAuth(http.HandlerFunc(s.handleSnapshot)))
+	s.mux.Handle("/admin/verify", s.withAuth(http.HandlerFunc(s.handleVerify)))
+	s.mux.Handle("/admin/compact", s.withAuth(http.HandlerFunc(s.handleCompact)))
+	s.mux.Handle("/admin/export", s.withAuth(http.HandlerFunc(s.handleExport)))
+	s.mux.Handle("/admin/import", s.withAuth(http.HandlerFunc(s.handleImport)))
+	s.mux.Handle("/dsl", s.withAuth(http.HandlerFunc(s.handleDSL)))
+	s.mux.Handle("/rules", s.withAuth(http.HandlerFunc(s.handleRules)))
+	s.mux.Handle("/rules/", s.withAuth(http.HandlerFunc(s.handleRule)))
+	s.mux.Handle("/tasks", s.withAuth(http.HandlerFunc(s.handleTasks)))
+	s.mux.Handle("/kv/", s.withAuth(http.HandlerFunc(s.handleKV)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	if s.auth == nil || !s.auth.Enabled() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := s.authorizeRequest(r); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) authorizeRequest(r *http.Request) (auth.Claims, error) {
+	if s.auth == nil || !s.auth.Enabled() {
+		return auth.Claims{}, nil
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
+		return s.auth.Verify(token)
+	}
+	token, err := auth.BearerToken(r.Header.Get("Authorization"))
+	if err != nil {
+		return auth.Claims{}, err
+	}
+	return s.auth.Verify(token)
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.auth == nil || !s.auth.Enabled() {
+		http.Error(w, "auth disabled", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	token, claims, err := s.auth.Login(strings.TrimSpace(req.Username), req.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":      token,
+		"username":   claims.Username,
+		"issued_at":  claims.IssuedAt,
+		"expires_at": claims.ExpiresAt,
+	})
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.engine.Stats())
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.Metrics())
+}
+
+func (s *Server) handleMetricsHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	metricsRaw := strings.TrimSpace(r.URL.Query().Get("metrics"))
+	if metricsRaw == "" {
+		http.Error(w, "metrics query is required", http.StatusBadRequest)
+		return
+	}
+	metrics := make([]string, 0)
+	for _, part := range strings.Split(metricsRaw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			metrics = append(metrics, part)
+		}
+	}
+	from, to, err := storage.ParseMetricHistoryWindow(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	bucket := 10 * time.Second
+	if raw := strings.TrimSpace(r.URL.Query().Get("bucket")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			http.Error(w, "invalid bucket", http.StatusBadRequest)
+			return
+		}
+		if parsed < 10*time.Second {
+			http.Error(w, "bucket must be >= 10s", http.StatusBadRequest)
+			return
+		}
+		bucket = parsed
+	}
+	series, err := s.engine.MetricsHistory(metrics, from, to, bucket)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"from":    from,
+		"to":      to,
+		"bucket":  bucket.String(),
+		"metrics": series,
+	})
+}
+
+func (s *Server) handleDebugPerf(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.engine.DebugPerf())
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +191,78 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, snapshot)
+}
+
+func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	report, err := s.engine.VerifyStorage()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleCompact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	report, err := s.engine.CompactStorage()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		scope = "full"
+	}
+	var segments []string
+	if raw := strings.TrimSpace(r.URL.Query().Get("segments")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				segments = append(segments, filepath.Base(part))
+			}
+		}
+	}
+
+	filename := fmt.Sprintf("anhebridgedb-%s-%s.tar.gz", scope, time.Now().UTC().Format("20060102T150405Z"))
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	if err := storage.ExportBackup(w, s.engine.DataDir(), scope, segments); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+}
+
+func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		scope = "full"
+	}
+	defer r.Body.Close()
+	report, err := storage.ImportBackup(r.Body, s.engine.DataDir(), scope)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, report)
 }
 
 func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +355,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, key stri
 		return
 	}
 	withDiff := r.URL.Query().Get("diff") == "true" || r.URL.Query().Get("diff") == "1"
-	timeline, err := s.engine.Timeline(key, withDiff)
+	limit, before, after, parseErr := parseWindowQuery(r)
+	if parseErr != nil {
+		http.Error(w, parseErr.Error(), http.StatusBadRequest)
+		return
+	}
+	timeline, err := s.engine.TimelineWindow(key, withDiff, limit, before, after)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -167,6 +373,29 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, key stri
 		"key":      key,
 		"timeline": timeline,
 	})
+}
+
+func parseWindowQuery(r *http.Request) (int, uint64, uint64, error) {
+	q := r.URL.Query()
+	limit := 0
+	before := uint64(0)
+	after := uint64(0)
+	if raw := q.Get("limit"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &limit); err != nil {
+			return 0, 0, 0, errors.New("invalid limit")
+		}
+	}
+	if raw := q.Get("before_version"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &before); err != nil {
+			return 0, 0, 0, errors.New("invalid before_version")
+		}
+	}
+	if raw := q.Get("after_version"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &after); err != nil {
+			return 0, 0, 0, errors.New("invalid after_version")
+		}
+	}
+	return limit, before, after, nil
 }
 
 func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {

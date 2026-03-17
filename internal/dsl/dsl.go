@@ -50,6 +50,8 @@ func (e *Executor) executeOne(statement string) (any, error) {
 		return e.executeRollback(stmt)
 	case strings.HasPrefix(strings.ToUpper(stmt), "CHECK "):
 		return e.executeCheck(stmt)
+	case strings.EqualFold(stmt, "SNAPSHOT"):
+		return e.engine.Snapshot()
 	case strings.EqualFold(stmt, "VERIFY STORAGE"):
 		return e.engine.VerifyStorage()
 	case strings.EqualFold(stmt, "COMPACT STORAGE"):
@@ -126,12 +128,27 @@ func (e *Executor) executeAGet(stmt string) (any, error) {
 	if payload == "" {
 		return nil, fmt.Errorf("AGET requires at least one key")
 	}
+	raw := false
+	if strings.HasSuffix(strings.ToUpper(payload), " RAW") {
+		raw = true
+		payload = strings.TrimSpace(payload[:len(payload)-4])
+	}
 	payload = strings.ReplaceAll(payload, ",", " ")
 	keys := strings.Fields(payload)
+	if raw {
+		return e.engine.BatchGetRaw(keys), nil
+	}
 	return e.engine.BatchGet(keys), nil
 }
 
 func (e *Executor) executeGet(stmt string) (any, error) {
+	raw := false
+	rawRe := regexp.MustCompile(`(?i)\s+RAW$`)
+	if rawRe.MatchString(stmt) && !strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
+		raw = true
+		stmt = strings.TrimSpace(rawRe.ReplaceAllString(stmt, ""))
+	}
+
 	if strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
 		return e.executeTimelineQuery(stmt)
 	}
@@ -151,6 +168,9 @@ func (e *Executor) executeGet(stmt string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if raw {
+			return e.engine.GetAtRaw(matches[1], ts.UTC())
+		}
 		return e.engine.GetAt(matches[1], ts.UTC())
 	}
 
@@ -160,11 +180,17 @@ func (e *Executor) executeGet(stmt string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if raw {
+			return e.engine.GetLastRaw(matches[1], steps)
+		}
 		return e.engine.GetLast(matches[1], steps)
 	}
 
 	latest := regexp.MustCompile(`(?i)^GET\s+(\S+)$`)
 	if matches := latest.FindStringSubmatch(stmt); len(matches) == 2 {
+		if raw {
+			return e.engine.GetRaw(matches[1])
+		}
 		return e.engine.Get(matches[1])
 	}
 
