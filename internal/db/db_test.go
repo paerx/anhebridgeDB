@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"anhebridgedb/internal/config"
+	"github.com/paerx/anhebridgedb/internal/config"
 )
 
 func TestTimelineAndDiff(t *testing.T) {

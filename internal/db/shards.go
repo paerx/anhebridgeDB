@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"sync"
 
-	"anhebridgedb/internal/storage"
+	"github.com/paerx/anhebridgedb/internal/storage"
 )
 
 const mapShardCount = 256

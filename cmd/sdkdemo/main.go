@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"anhebridgedb/sdk/anhe"
+	"github.com/paerx/anhebridgedb/sdk/anhe"
 )
 
 func main() {

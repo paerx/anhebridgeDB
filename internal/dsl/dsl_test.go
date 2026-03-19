@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"anhebridgedb/internal/db"
+	"github.com/paerx/anhebridgedb/internal/db"
 )
 
 func TestExecuteEndToEnd(t *testing.T) {

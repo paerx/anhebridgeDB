@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"anhebridgedb/internal/storage"
+	"github.com/paerx/anhebridgedb/internal/storage"
 )
 
 type eventCache struct {

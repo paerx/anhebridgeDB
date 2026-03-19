@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	"anhebridgedb/internal/config"
+	"github.com/paerx/anhebridgedb/internal/config"
 )
 
 func TestLoginAndVerify(t *testing.T) {
