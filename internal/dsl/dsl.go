@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"anhebridgedb/internal/db"
+	"github.com/paerx/anhebridgedb/internal/db"
 )
 
 type Executor struct {

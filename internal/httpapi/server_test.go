@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"anhebridgedb/internal/db"
-	"anhebridgedb/internal/storage"
+	"github.com/paerx/anhebridgedb/internal/db"
+	"github.com/paerx/anhebridgedb/internal/storage"
 )
 
 func TestMetricsHistoryEndpoint(t *testing.T) {

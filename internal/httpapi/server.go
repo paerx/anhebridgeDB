@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"anhebridgedb/internal/auth"
-	"anhebridgedb/internal/db"
-	"anhebridgedb/internal/dsl"
-	"anhebridgedb/internal/storage"
+	"github.com/paerx/anhebridgedb/internal/auth"
+	"github.com/paerx/anhebridgedb/internal/db"
+	"github.com/paerx/anhebridgedb/internal/dsl"
+	"github.com/paerx/anhebridgedb/internal/storage"
 )
 
 type Server struct {

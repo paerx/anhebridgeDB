@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"anhebridgedb/internal/config"
+	"github.com/paerx/anhebridgedb/internal/config"
 )
 
 var (

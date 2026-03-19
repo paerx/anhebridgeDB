@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"anhebridgedb/internal/config"
-	"anhebridgedb/internal/storage"
+	"github.com/paerx/anhebridgedb/internal/config"
+	"github.com/paerx/anhebridgedb/internal/storage"
 )
 
 var ErrNotFound = errors.New("key not found")

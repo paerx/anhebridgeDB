@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"anhebridgedb/internal/auth"
-	"anhebridgedb/internal/config"
-	"anhebridgedb/internal/db"
-	"anhebridgedb/internal/httpapi"
+	"github.com/paerx/anhebridgedb/internal/auth"
+	"github.com/paerx/anhebridgedb/internal/config"
+	"github.com/paerx/anhebridgedb/internal/db"
+	"github.com/paerx/anhebridgedb/internal/httpapi"
 )
 
 func main() {
