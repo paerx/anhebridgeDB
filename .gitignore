@@ -6,3 +6,8 @@ data/**/*.anhe
 
 # Docs assets and local docs payloads
 docs/*
+
+# www
+Anhewww/*
+
+docswww/*
