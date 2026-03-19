@@ -17,11 +17,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/paerx/anhebridgeDB">Live Demo</a>
+  <a href="https://anhe.impaer.xyz/">Website</a>
   ·
-  <a href="https://github.com/paerx/anhebridgeDB">DSL Playground</a>
-  ·
-  <a href="https://github.com/paerx/anhebridgeDB">Docs</a>
+  <a href="https://ahd.impaer.xyz/">Docs</a>
   ·
 
 <a href="https://mail.google.com/mail/?view=cm&fs=1&to=realpaerpang@gmail.com">
