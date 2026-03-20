@@ -1,0 +1,33 @@
+2026-03-20 v1.0.2 optimization log
+
+Scope:
+- Reduce AGET/ASET JSON decode/encode overhead.
+- Separate index flush modes: strong sync vs async flush.
+- Add key lock wait observability.
+
+Changes:
+1) Batch index flush pipeline
+- Added batch append APIs for key/search/idempotency indexes.
+- Reworked BatchSet to apply events in-memory first, then flush indexes in batch.
+- Reduced per-event open/write/sync amplification.
+
+2) Configurable index flush mode
+- Added performance.index_flush_mode with values: sync | async.
+- Default remains sync.
+- Added async index flush worker with queue + sync fallback when queue is full.
+
+3) Lock wait metrics
+- Added wait-time sampling for lockKey/rlockKey/lockKeys/rlockKeys.
+- Metrics now include key_lock_wait_count/p50/p95.
+
+4) DSL hot path optimization
+- Added fast parsing path for common scalar ASET items.
+- Optimized AGET key splitting to reduce string allocation overhead.
+
+Validation:
+- go test ./... passed after optimization changes.
+- RW stress throughput improved significantly compared with pre-batch-flush baseline.
+
+Notes:
+- Transfer hotspot bottleneck still exists for single main-account key contention.
+- Next phase should prioritize account sharding and further async persistence tuning.

@@ -83,6 +83,7 @@ type perfMetrics struct {
 	check         *opMetric
 	set           *opMetric
 	aset          *opMetric
+	keyLockWait   *opMetric
 	append        *opMetric
 	keyIndexFlush *opMetric
 	scheduler     *opMetric
@@ -97,6 +98,7 @@ func newPerfMetrics() *perfMetrics {
 		check:         newOpMetric(1024),
 		set:           newOpMetric(2048),
 		aset:          newOpMetric(1024),
+		keyLockWait:   newOpMetric(4096),
 		append:        newOpMetric(4096),
 		keyIndexFlush: newOpMetric(1024),
 		scheduler:     newOpMetric(1024),
@@ -150,6 +152,9 @@ func (e *Engine) Metrics() map[string]any {
 		metrics[k] = v
 	}
 	for k, v := range e.metrics.aset.snapshot("aset") {
+		metrics[k] = v
+	}
+	for k, v := range e.metrics.keyLockWait.snapshot("key_lock_wait") {
 		metrics[k] = v
 	}
 	for k, v := range e.metrics.append.snapshot("append") {
