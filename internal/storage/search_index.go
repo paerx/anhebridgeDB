@@ -37,7 +37,11 @@ func IdempotencyIndexPath(dir string) string {
 }
 
 func AppendSearchIndexEntry(dir string, entry SearchIndexEntry) error {
-	return appendJSONLine(SearchIndexPath(dir), entry)
+	return AppendSearchIndexEntries(dir, []SearchIndexEntry{entry})
+}
+
+func AppendSearchIndexEntries(dir string, entries []SearchIndexEntry) error {
+	return appendJSONLines(SearchIndexPath(dir), entries)
 }
 
 func SaveSearchIndex(dir string, entries []SearchIndexEntry) error {
@@ -71,7 +75,11 @@ func LoadSearchIndex(dir string) ([]SearchIndexEntry, error) {
 }
 
 func AppendIdempotencyIndexEntry(dir string, entry IdempotencyIndexEntry) error {
-	return appendJSONLine(IdempotencyIndexPath(dir), entry)
+	return AppendIdempotencyIndexEntries(dir, []IdempotencyIndexEntry{entry})
+}
+
+func AppendIdempotencyIndexEntries(dir string, entries []IdempotencyIndexEntry) error {
+	return appendJSONLines(IdempotencyIndexPath(dir), entries)
 }
 
 func SaveIdempotencyIndex(dir string, entries []IdempotencyIndexEntry) error {
@@ -115,6 +123,13 @@ func IdempotencyIndexExists(dir string) bool {
 }
 
 func appendJSONLine(path string, value any) error {
+	return appendJSONLines(path, []any{value})
+}
+
+func appendJSONLines[T any](path string, values []T) error {
+	if len(values) == 0 {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -123,11 +138,16 @@ func appendJSONLine(path string, value any) error {
 		return err
 	}
 	defer file.Close()
-	bytes, err := json.Marshal(value)
-	if err != nil {
-		return err
+	payload := make([]byte, 0, len(values)*96)
+	for _, value := range values {
+		bytes, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		payload = append(payload, bytes...)
+		payload = append(payload, '\n')
 	}
-	if _, err := file.Write(append(bytes, '\n')); err != nil {
+	if _, err := file.Write(payload); err != nil {
 		return err
 	}
 	return file.Sync()

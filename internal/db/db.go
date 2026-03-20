@@ -153,12 +153,22 @@ type Engine struct {
 	keyIndexOps    uint64
 	metrics        *perfMetrics
 	perfCfg        config.PerformanceConfig
+	indexFlushMode string
+	indexFlushCh   chan indexFlushBatch
+	indexFlushStop chan struct{}
+	indexFlushWG   sync.WaitGroup
 	strictRecovery bool
 	searchAll      []storage.SearchIndexEntry
 	searchByKey    map[string][]storage.SearchIndexEntry
 	searchByEvent  map[string][]storage.SearchIndexEntry
 	searchByIDKey  map[string][]storage.SearchIndexEntry
 	idempotency    map[string]storage.IdempotencyIndexEntry
+}
+
+type indexFlushBatch struct {
+	keyEntries    []storage.KeyIndexEntry
+	searchEntries []storage.SearchIndexEntry
+	idEntries     []storage.IdempotencyIndexEntry
 }
 
 func Open(dataDir string) (*Engine, error) {
@@ -187,6 +197,7 @@ func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg con
 		eventCache:     newEventCache(perfCfg.EventCacheMaxItems, perfCfg.EventCacheMaxBytes),
 		metrics:        newPerfMetrics(),
 		perfCfg:        perfCfg,
+		indexFlushMode: normalizeIndexFlushMode(perfCfg.IndexFlushMode),
 		strictRecovery: strictRecovery,
 		searchByKey:    map[string][]storage.SearchIndexEntry{},
 		searchByEvent:  map[string][]storage.SearchIndexEntry{},
@@ -197,6 +208,9 @@ func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg con
 	if err := engine.recover(); err != nil {
 		_ = log.Close()
 		return nil, err
+	}
+	if engine.indexFlushMode == "async" {
+		engine.startIndexFlushWorker()
 	}
 	return engine, nil
 }
@@ -451,6 +465,7 @@ func (e *Engine) CompactStorage() (CompactReport, error) {
 }
 
 func (e *Engine) Close() error {
+	e.stopIndexFlushWorker()
 	return e.log.Close()
 }
 
@@ -568,12 +583,23 @@ func (e *Engine) BatchSet(items []BatchSetItem) ([]storage.Event, error) {
 	}
 	e.metaMu.Lock()
 	defer e.metaMu.Unlock()
+	keyEntries := make([]storage.KeyIndexEntry, 0, len(persisted))
+	searchEntries := make([]storage.SearchIndexEntry, 0, len(persisted))
+	idEntries := make([]storage.IdempotencyIndexEntry, 0, len(persisted))
 	for i, event := range persisted {
-		e.applyPersistedLocked(event)
+		keyEntry, searchEntry, idEntry := e.applyPersistedInMemoryLocked(event)
+		keyEntries = append(keyEntries, keyEntry)
+		searchEntries = append(searchEntries, searchEntry)
+		if idEntry != nil {
+			idEntries = append(idEntries, *idEntry)
+		}
 		if err := e.scheduleMatchingRulesLocked(event, false); err != nil {
 			return nil, err
 		}
 		results[eventIndexes[i]] = event
+	}
+	if err := e.persistBatchIndexesLocked(keyEntries, searchEntries, idEntries); err != nil {
+		return nil, err
 	}
 	if err := e.persistRuleStateLocked(); err != nil {
 		return nil, err
@@ -1325,6 +1351,12 @@ func (e *Engine) CheckAllTimeWindow(key string, limit int, beforeVersion, afterV
 }
 
 func (e *Engine) applyPersistedLocked(event storage.Event) {
+	keyEntry, searchEntry, idEntry := e.applyPersistedInMemoryLocked(event)
+	_ = e.persistKeyIndexLocked(keyEntry)
+	_ = e.persistSearchIndexesLocked(searchEntry, idEntry)
+}
+
+func (e *Engine) applyPersistedInMemoryLocked(event storage.Event) (storage.KeyIndexEntry, storage.SearchIndexEntry, *storage.IdempotencyIndexEntry) {
 	e.storeEvent(event)
 	ref, _ := e.loadEventRef(event.EventID)
 	ref.EventID = event.EventID
@@ -1333,7 +1365,8 @@ func (e *Engine) applyPersistedLocked(event storage.Event) {
 	ref.PrevEventID = event.PrevVersionOffset
 	e.storeEventRef(event.EventID, ref)
 	e.storeLatestVersion(event.Key, event.EventID)
-	e.storeKeyIndex(event.Key, storage.KeyIndexEntry{Key: event.Key, LatestEvent: event.EventID, UpdatedAt: event.Timestamp})
+	keyEntry := storage.KeyIndexEntry{Key: event.Key, LatestEvent: event.EventID, UpdatedAt: event.Timestamp}
+	e.storeKeyIndex(event.Key, keyEntry)
 	searchEntry := storage.SearchIndexEntry{
 		EventID:        event.EventID,
 		Key:            event.Key,
@@ -1342,8 +1375,9 @@ func (e *Engine) applyPersistedLocked(event storage.Event) {
 		Timestamp:      event.Timestamp,
 	}
 	e.storeSearchEntryLocked(searchEntry)
+	var idEntry *storage.IdempotencyIndexEntry
 	if event.IdempotencyKey != "" {
-		e.idempotency[buildIdempotencyCompositeKey(event.Key, event.EventName, event.IdempotencyKey)] = storage.IdempotencyIndexEntry{
+		entry := storage.IdempotencyIndexEntry{
 			CompositeKey:   buildIdempotencyCompositeKey(event.Key, event.EventName, event.IdempotencyKey),
 			Key:            event.Key,
 			EventName:      event.EventName,
@@ -1352,11 +1386,12 @@ func (e *Engine) applyPersistedLocked(event storage.Event) {
 			RequestHash:    event.IdempotencyHash,
 			Timestamp:      event.Timestamp,
 		}
+		e.idempotency[entry.CompositeKey] = entry
+		idEntry = &entry
 	}
 	e.updateLastEventID(event.EventID)
 	e.applyLocked(event)
-	_ = e.persistKeyIndexLocked(storage.KeyIndexEntry{Key: event.Key, LatestEvent: event.EventID, UpdatedAt: event.Timestamp})
-	_ = e.persistSearchIndexesLocked(searchEntry, event)
+	return keyEntry, searchEntry, idEntry
 }
 
 func (e *Engine) applyLocked(event storage.Event) {
@@ -1431,45 +1466,79 @@ func (e *Engine) persistRulesLocked() error {
 }
 
 func (e *Engine) persistKeyIndexLocked(entry storage.KeyIndexEntry) error {
+	return e.persistBatchIndexesLocked([]storage.KeyIndexEntry{entry}, nil, nil)
+}
+
+func (e *Engine) persistBatchIndexesLocked(keyEntries []storage.KeyIndexEntry, searchEntries []storage.SearchIndexEntry, idEntries []storage.IdempotencyIndexEntry) error {
+	if len(keyEntries) == 0 && len(searchEntries) == 0 && len(idEntries) == 0 {
+		return nil
+	}
+	if e.indexFlushMode == "async" && e.indexFlushCh != nil {
+		batch := indexFlushBatch{
+			keyEntries:    append([]storage.KeyIndexEntry(nil), keyEntries...),
+			searchEntries: append([]storage.SearchIndexEntry(nil), searchEntries...),
+			idEntries:     append([]storage.IdempotencyIndexEntry(nil), idEntries...),
+		}
+		select {
+		case e.indexFlushCh <- batch:
+			return nil
+		default:
+			// Backpressure fallback: flush synchronously when queue is full.
+		}
+	}
+	return e.flushIndexBatchToDisk(keyEntries, searchEntries, idEntries)
+}
+
+func (e *Engine) persistSearchIndexesLocked(searchEntry storage.SearchIndexEntry, idEntry *storage.IdempotencyIndexEntry) error {
+	if idEntry != nil {
+		return e.persistBatchIndexesLocked(nil, []storage.SearchIndexEntry{searchEntry}, []storage.IdempotencyIndexEntry{*idEntry})
+	}
+	return e.persistBatchIndexesLocked(nil, []storage.SearchIndexEntry{searchEntry}, nil)
+}
+
+func (e *Engine) flushIndexBatchToDisk(keyEntries []storage.KeyIndexEntry, searchEntries []storage.SearchIndexEntry, idEntries []storage.IdempotencyIndexEntry) error {
 	e.persistMu.Lock()
 	defer e.persistMu.Unlock()
 	start := time.Now()
 	defer observe(e.metrics.keyIndexFlush, start)
-	if entry.Key != "" {
-		if err := storage.AppendKeyIndexDelta(e.dataDir, entry); err != nil {
+	if len(keyEntries) > 0 {
+		entries := make([]storage.KeyIndexEntry, 0, len(keyEntries))
+		for _, entry := range keyEntries {
+			if entry.Key == "" {
+				continue
+			}
+			entries = append(entries, entry)
+		}
+		if len(entries) > 0 {
+			if err := storage.AppendKeyIndexDeltaBatch(e.dataDir, entries); err != nil {
+				return err
+			}
+			prevOps := e.keyIndexOps
+			e.keyIndexOps += uint64(len(entries))
+			compactEvery := uint64(e.perfCfg.KeyIndexCompactOps)
+			if compactEvery > 0 && (prevOps/compactEvery != e.keyIndexOps/compactEvery) {
+				entriesMap := map[string]storage.KeyIndexEntry{}
+				e.keyIndex.rangeAll(func(key string, value storage.KeyIndexEntry) bool {
+					entriesMap[key] = value
+					return true
+				})
+				if err := storage.CompactKeyIndex(e.dataDir, entriesMap); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if len(searchEntries) > 0 {
+		if err := storage.AppendSearchIndexEntries(e.dataDir, searchEntries); err != nil {
 			return err
 		}
 	}
-	e.keyIndexOps++
-	if e.keyIndexOps%uint64(e.perfCfg.KeyIndexCompactOps) != 0 {
-		return nil
+	if len(idEntries) > 0 {
+		if err := storage.AppendIdempotencyIndexEntries(e.dataDir, idEntries); err != nil {
+			return err
+		}
 	}
-	entries := map[string]storage.KeyIndexEntry{}
-	e.keyIndex.rangeAll(func(key string, value storage.KeyIndexEntry) bool {
-		entries[key] = value
-		return true
-	})
-	return storage.CompactKeyIndex(e.dataDir, entries)
-}
-
-func (e *Engine) persistSearchIndexesLocked(searchEntry storage.SearchIndexEntry, event storage.Event) error {
-	e.persistMu.Lock()
-	defer e.persistMu.Unlock()
-	if err := storage.AppendSearchIndexEntry(e.dataDir, searchEntry); err != nil {
-		return err
-	}
-	if event.IdempotencyKey == "" {
-		return nil
-	}
-	return storage.AppendIdempotencyIndexEntry(e.dataDir, storage.IdempotencyIndexEntry{
-		CompositeKey:   buildIdempotencyCompositeKey(event.Key, event.EventName, event.IdempotencyKey),
-		Key:            event.Key,
-		EventName:      event.EventName,
-		IdempotencyKey: event.IdempotencyKey,
-		EventID:        event.EventID,
-		RequestHash:    event.IdempotencyHash,
-		Timestamp:      event.Timestamp,
-	})
+	return nil
 }
 
 func (e *Engine) nextTimestampLocked() time.Time {
@@ -1625,6 +1694,15 @@ func normalizeNumber(value float64) (json.RawMessage, error) {
 	return json.RawMessage(strconv.FormatFloat(value, 'f', -1, 64)), nil
 }
 
+func normalizeIndexFlushMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "async":
+		return "async"
+	default:
+		return "sync"
+	}
+}
+
 func (e *Engine) keyLockIndex(key string) int {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(key))
@@ -1633,13 +1711,17 @@ func (e *Engine) keyLockIndex(key string) int {
 
 func (e *Engine) lockKey(key string) func() {
 	idx := e.keyLockIndex(key)
+	start := time.Now()
 	e.keyLocks[idx].Lock()
+	observe(e.metrics.keyLockWait, start)
 	return e.keyLocks[idx].Unlock
 }
 
 func (e *Engine) rlockKey(key string) func() {
 	idx := e.keyLockIndex(key)
+	start := time.Now()
 	e.keyLocks[idx].RLock()
+	observe(e.metrics.keyLockWait, start)
 	return e.keyLocks[idx].RUnlock
 }
 
@@ -1648,9 +1730,11 @@ func (e *Engine) lockKeys(keys []string) func() {
 		return func() {}
 	}
 	indexes := uniqueSortedIndexes(keys, e.keyLockIndex)
+	start := time.Now()
 	for _, idx := range indexes {
 		e.keyLocks[idx].Lock()
 	}
+	observe(e.metrics.keyLockWait, start)
 	return func() {
 		for i := len(indexes) - 1; i >= 0; i-- {
 			e.keyLocks[indexes[i]].Unlock()
@@ -1663,14 +1747,55 @@ func (e *Engine) rlockKeys(keys []string) func() {
 		return func() {}
 	}
 	indexes := uniqueSortedIndexes(keys, e.keyLockIndex)
+	start := time.Now()
 	for _, idx := range indexes {
 		e.keyLocks[idx].RLock()
 	}
+	observe(e.metrics.keyLockWait, start)
 	return func() {
 		for i := len(indexes) - 1; i >= 0; i-- {
 			e.keyLocks[indexes[i]].RUnlock()
 		}
 	}
+}
+
+func (e *Engine) startIndexFlushWorker() {
+	e.indexFlushCh = make(chan indexFlushBatch, 1024)
+	e.indexFlushStop = make(chan struct{})
+	e.indexFlushWG.Add(1)
+	go func() {
+		defer e.indexFlushWG.Done()
+		for {
+			select {
+			case batch := <-e.indexFlushCh:
+				_ = e.flushIndexBatchToDisk(batch.keyEntries, batch.searchEntries, batch.idEntries)
+			case <-e.indexFlushStop:
+				for {
+					select {
+					case batch := <-e.indexFlushCh:
+						_ = e.flushIndexBatchToDisk(batch.keyEntries, batch.searchEntries, batch.idEntries)
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (e *Engine) stopIndexFlushWorker() {
+	if e.indexFlushMode != "async" {
+		return
+	}
+	if e.indexFlushStop == nil {
+		return
+	}
+	select {
+	case <-e.indexFlushStop:
+	default:
+		close(e.indexFlushStop)
+	}
+	e.indexFlushWG.Wait()
 }
 
 func uniqueSortedIndexes(keys []string, fn func(string) int) []int {

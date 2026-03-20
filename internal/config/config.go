@@ -30,16 +30,17 @@ type StorageConfig struct {
 }
 
 type PerformanceConfig struct {
-	EventCacheMaxItems           int `json:"event_cache_max_items"`
-	EventCacheMaxBytes           int `json:"event_cache_max_bytes"`
-	KeyIndexCompactOps           int `json:"key_index_compact_ops"`
-	SchedulerWorkers             int `json:"scheduler_workers"`
-	MetricsSampleIntervalSeconds int `json:"metrics_sample_interval_seconds"`
-	SnapshotBatchSize            int `json:"snapshot_batch_size"`
-	TimelineDefaultLimit         int `json:"timeline_default_limit"`
-	SuperValueMaxDepth           int `json:"super_value_max_depth"`
-	SuperValueMaxFanout          int `json:"super_value_max_fanout"`
-	SuperValueMaxNodes           int `json:"super_value_max_nodes"`
+	EventCacheMaxItems           int    `json:"event_cache_max_items"`
+	EventCacheMaxBytes           int    `json:"event_cache_max_bytes"`
+	KeyIndexCompactOps           int    `json:"key_index_compact_ops"`
+	IndexFlushMode               string `json:"index_flush_mode"`
+	SchedulerWorkers             int    `json:"scheduler_workers"`
+	MetricsSampleIntervalSeconds int    `json:"metrics_sample_interval_seconds"`
+	SnapshotBatchSize            int    `json:"snapshot_batch_size"`
+	TimelineDefaultLimit         int    `json:"timeline_default_limit"`
+	SuperValueMaxDepth           int    `json:"super_value_max_depth"`
+	SuperValueMaxFanout          int    `json:"super_value_max_fanout"`
+	SuperValueMaxNodes           int    `json:"super_value_max_nodes"`
 }
 
 type SegmentConfig struct {
@@ -64,6 +65,7 @@ func Default() Config {
 			EventCacheMaxItems:           50000,
 			EventCacheMaxBytes:           128 * 1024 * 1024,
 			KeyIndexCompactOps:           10000,
+			IndexFlushMode:               "sync",
 			SchedulerWorkers:             4,
 			MetricsSampleIntervalSeconds: 10,
 			SnapshotBatchSize:            10000,
@@ -105,6 +107,7 @@ func Load(path string) (Config, error) {
 	if cfg.Performance.KeyIndexCompactOps <= 0 {
 		cfg.Performance.KeyIndexCompactOps = Default().Performance.KeyIndexCompactOps
 	}
+	cfg.Performance.IndexFlushMode = normalizeIndexFlushMode(cfg.Performance.IndexFlushMode)
 	if cfg.Performance.SchedulerWorkers <= 0 {
 		cfg.Performance.SchedulerWorkers = Default().Performance.SchedulerWorkers
 	}
@@ -130,4 +133,15 @@ func Load(path string) (Config, error) {
 		cfg.Auth.TokenTTLMinutes = Default().Auth.TokenTTLMinutes
 	}
 	return cfg, nil
+}
+
+func normalizeIndexFlushMode(mode string) string {
+	switch mode {
+	case "sync", "SYNC":
+		return "sync"
+	case "async", "ASYNC":
+		return "async"
+	default:
+		return "sync"
+	}
 }

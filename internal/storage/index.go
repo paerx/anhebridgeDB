@@ -148,6 +148,13 @@ func SaveKeyIndexSnapshot(dir string, entries map[string]KeyIndexEntry) error {
 }
 
 func AppendKeyIndexDelta(dir string, entry KeyIndexEntry) error {
+	return AppendKeyIndexDeltaBatch(dir, []KeyIndexEntry{entry})
+}
+
+func AppendKeyIndexDeltaBatch(dir string, entries []KeyIndexEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
 	path := KeyIndexDeltaPath(dir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -157,11 +164,16 @@ func AppendKeyIndexDelta(dir string, entry KeyIndexEntry) error {
 		return err
 	}
 	defer file.Close()
-	bytes, err := json.Marshal(entry)
-	if err != nil {
-		return err
+	payload := make([]byte, 0, len(entries)*64)
+	for _, entry := range entries {
+		bytes, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		payload = append(payload, bytes...)
+		payload = append(payload, '\n')
 	}
-	if _, err := file.Write(append(bytes, '\n')); err != nil {
+	if _, err := file.Write(payload); err != nil {
 		return err
 	}
 	return file.Sync()

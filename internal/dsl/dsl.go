@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,6 +106,12 @@ func (e *Executor) executeASet(stmt string) (any, error) {
 		if strings.HasPrefix(strings.ToUpper(itemText), "SET ") {
 			itemText = strings.TrimSpace(itemText[len("SET "):])
 		}
+		if fast, ok, err := parseASetItemFast(itemText); err != nil {
+			return nil, err
+		} else if ok {
+			items = append(items, fast)
+			continue
+		}
 		parts := strings.SplitN(itemText, " ", 2)
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("invalid ASET item: %s", itemText)
@@ -133,8 +140,7 @@ func (e *Executor) executeAGet(stmt string) (any, error) {
 		raw = true
 		payload = strings.TrimSpace(payload[:len(payload)-4])
 	}
-	payload = strings.ReplaceAll(payload, ",", " ")
-	keys := strings.Fields(payload)
+	keys := splitAGetKeys(payload)
 	if raw {
 		return e.engine.BatchGetRaw(keys), nil
 	}
@@ -318,6 +324,70 @@ func parseJSONOrScalar(value string) (json.RawMessage, error) {
 		return nil, err
 	}
 	return bytes, nil
+}
+
+func splitAGetKeys(payload string) []string {
+	if payload == "" {
+		return nil
+	}
+	keys := strings.FieldsFunc(payload, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ','
+	})
+	return keys
+}
+
+func parseASetItemFast(itemText string) (db.BatchSetItem, bool, error) {
+	parts := strings.Fields(itemText)
+	if len(parts) < 2 || len(parts) > 4 {
+		return db.BatchSetItem{}, false, nil
+	}
+	key := parts[0]
+	valueToken := parts[1]
+	var eventName, idem string
+	for _, token := range parts[2:] {
+		if isIdempotencyToken(token) {
+			idem = parseIdempotencyToken(token)
+			continue
+		}
+		if isEventName(token) {
+			eventName = token
+			continue
+		}
+		return db.BatchSetItem{}, false, nil
+	}
+	value, ok := parseFastScalar(valueToken)
+	if !ok {
+		return db.BatchSetItem{}, false, nil
+	}
+	return db.BatchSetItem{
+		Key:            key,
+		Value:          value,
+		EventName:      eventName,
+		IdempotencyKey: idem,
+	}, true, nil
+}
+
+func parseFastScalar(token string) (json.RawMessage, bool) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "\"") {
+		return nil, false
+	}
+	if _, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return json.RawMessage(trimmed), true
+	}
+	switch strings.ToLower(trimmed) {
+	case "true", "false", "null":
+		return json.RawMessage(strings.ToLower(trimmed)), true
+	default:
+		bytes, err := json.Marshal(trimmed)
+		if err != nil {
+			return nil, false
+		}
+		return json.RawMessage(bytes), true
+	}
 }
 
 type setPayload struct {
