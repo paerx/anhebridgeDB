@@ -4,6 +4,8 @@
 # Local runtime data
 data/**/*.anhe
 
+data/**/*.json
+
 # Docs assets and local docs payloads
 docs/*
 
