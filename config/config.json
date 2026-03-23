@@ -1,6 +1,6 @@
 {
   "auth": {
-    "enabled": false,
+    "enabled": true,
     "token_ttl_minutes": 1440,
     "users": [
       {
@@ -13,7 +13,7 @@
     "strict_recovery": false,
     "segment": {
       "max_bytes": 67108864,
-      "max_records": 20000
+      "max_records": 200000
     }
   },
   "performance": {
@@ -21,11 +21,18 @@
     "event_cache_max_bytes": 134217728,
     "key_index_compact_ops": 10000,
     "scheduler_workers": 4,
+    "index_flush_mode": "async",
+    "ingress_max_inflight": 256,
+    "ingress_max_queue": 1024,
+    "ingress_queue_timeout_ms": 2000,
     "metrics_sample_interval_seconds": 10,
     "snapshot_batch_size": 10000,
     "timeline_default_limit": 1000,
     "super_value_max_depth": 5,
     "super_value_max_fanout": 200,
     "super_value_max_nodes": 1000
+  },
+  "transport": {
+    "ws_only_mode": true
   }
 }

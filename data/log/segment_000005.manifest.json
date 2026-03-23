@@ -1,0 +1,13 @@
+{
+  "segment": "segment_000005.anhe",
+  "first_event_id": 577208,
+  "last_event_id": 643079,
+  "record_count": 65872,
+  "size_bytes": 27983427,
+  "first_timestamp": "2026-03-20T15:00:56.460506Z",
+  "last_timestamp": "2026-03-23T09:44:37.224576Z",
+  "first_auth_tag": "MRkMon4urqsD8vjRzEOAzOfZVIJ9newHU03DChcfRWI",
+  "last_auth_tag": "675_uh8VFSro8f1tAc8cqkkV2gU5NmFOMfzYCj7yuRU",
+  "manifest_auth": "qWVJle-lzHWUe_7cvvJKLKCbMWZsrCfbi1F7JFUblZ0",
+  "updated_at": "2026-03-23T09:44:37.236888Z"
+}

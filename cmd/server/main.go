@@ -43,7 +43,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.New(engine, authManager).Handler(),
+		Handler:           httpapi.NewWithConfig(engine, authManager, cfg).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
