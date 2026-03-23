@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/paerx/anhebridgedb/internal/config"
 	"github.com/paerx/anhebridgedb/internal/db"
 	"github.com/paerx/anhebridgedb/internal/storage"
 )
@@ -35,7 +36,7 @@ func TestMetricsHistoryEndpoint(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	New(engine, nil).Handler().ServeHTTP(rec, req)
+	New(engine, nil, config.Default().Performance).Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}

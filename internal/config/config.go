@@ -10,6 +10,7 @@ type Config struct {
 	Auth        AuthConfig        `json:"auth"`
 	Storage     StorageConfig     `json:"storage"`
 	Performance PerformanceConfig `json:"performance"`
+	Transport   TransportConfig   `json:"transport"`
 }
 
 type AuthConfig struct {
@@ -34,6 +35,9 @@ type PerformanceConfig struct {
 	EventCacheMaxBytes           int    `json:"event_cache_max_bytes"`
 	KeyIndexCompactOps           int    `json:"key_index_compact_ops"`
 	IndexFlushMode               string `json:"index_flush_mode"`
+	IngressMaxInFlight           int    `json:"ingress_max_inflight"`
+	IngressMaxQueue              int    `json:"ingress_max_queue"`
+	IngressQueueTimeoutMS        int    `json:"ingress_queue_timeout_ms"`
 	SchedulerWorkers             int    `json:"scheduler_workers"`
 	MetricsSampleIntervalSeconds int    `json:"metrics_sample_interval_seconds"`
 	SnapshotBatchSize            int    `json:"snapshot_batch_size"`
@@ -46,6 +50,10 @@ type PerformanceConfig struct {
 type SegmentConfig struct {
 	MaxBytes   int64 `json:"max_bytes"`
 	MaxRecords int   `json:"max_records"`
+}
+
+type TransportConfig struct {
+	WSOnlyMode bool `json:"ws_only_mode"`
 }
 
 func Default() Config {
@@ -66,6 +74,9 @@ func Default() Config {
 			EventCacheMaxBytes:           128 * 1024 * 1024,
 			KeyIndexCompactOps:           10000,
 			IndexFlushMode:               "sync",
+			IngressMaxInFlight:           256,
+			IngressMaxQueue:              1024,
+			IngressQueueTimeoutMS:        1500,
 			SchedulerWorkers:             4,
 			MetricsSampleIntervalSeconds: 10,
 			SnapshotBatchSize:            10000,
@@ -73,6 +84,9 @@ func Default() Config {
 			SuperValueMaxDepth:           5,
 			SuperValueMaxFanout:          200,
 			SuperValueMaxNodes:           1000,
+		},
+		Transport: TransportConfig{
+			WSOnlyMode: false,
 		},
 	}
 }
@@ -108,6 +122,15 @@ func Load(path string) (Config, error) {
 		cfg.Performance.KeyIndexCompactOps = Default().Performance.KeyIndexCompactOps
 	}
 	cfg.Performance.IndexFlushMode = normalizeIndexFlushMode(cfg.Performance.IndexFlushMode)
+	if cfg.Performance.IngressMaxInFlight <= 0 {
+		cfg.Performance.IngressMaxInFlight = Default().Performance.IngressMaxInFlight
+	}
+	if cfg.Performance.IngressMaxQueue <= 0 {
+		cfg.Performance.IngressMaxQueue = Default().Performance.IngressMaxQueue
+	}
+	if cfg.Performance.IngressQueueTimeoutMS <= 0 {
+		cfg.Performance.IngressQueueTimeoutMS = Default().Performance.IngressQueueTimeoutMS
+	}
 	if cfg.Performance.SchedulerWorkers <= 0 {
 		cfg.Performance.SchedulerWorkers = Default().Performance.SchedulerWorkers
 	}

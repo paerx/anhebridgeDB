@@ -1,4 +1,4 @@
-package main
+package clientws
 
 import (
 	"bufio"
@@ -18,7 +18,9 @@ import (
 	"time"
 )
 
-type wsExecutor struct {
+const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+type Executor struct {
 	addr      string
 	token     string
 	conn      net.Conn
@@ -27,48 +29,39 @@ type wsExecutor struct {
 	requestID uint64
 }
 
-const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-
 type wsResponseEnvelope struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
-func newWSExecutor(addr string, store *authState) (*wsExecutor, error) {
-	token := ""
-	if store != nil && strings.TrimRight(store.Addr, "/") == strings.TrimRight(addr, "/") {
-		token = strings.TrimSpace(store.Token)
-	}
-	exec := &wsExecutor{addr: addr, token: token}
+func New(addr, token string) (*Executor, error) {
+	exec := &Executor{addr: addr, token: strings.TrimSpace(token)}
 	if err := exec.connect(); err != nil {
 		return nil, err
 	}
 	return exec, nil
 }
 
-func (e *wsExecutor) close() error {
+func (e *Executor) Close() error {
 	if e == nil || e.conn == nil {
 		return nil
 	}
 	return e.conn.Close()
 }
 
-func (e *wsExecutor) updateToken(addr string, store *authState) error {
-	newToken := ""
-	if store != nil && strings.TrimRight(store.Addr, "/") == strings.TrimRight(addr, "/") {
-		newToken = strings.TrimSpace(store.Token)
-	}
-	if e.conn != nil && e.addr == addr && e.token == newToken {
+func (e *Executor) Update(addr, token string) error {
+	token = strings.TrimSpace(token)
+	if e.conn != nil && e.addr == addr && e.token == token {
 		return nil
 	}
-	_ = e.close()
+	_ = e.Close()
 	e.addr = addr
-	e.token = newToken
+	e.token = token
 	return e.connect()
 }
 
-func (e *wsExecutor) execute(query string) ([]any, error) {
+func (e *Executor) Execute(query string) ([]any, error) {
 	if err := e.ensureConnected(); err != nil {
 		return nil, err
 	}
@@ -83,14 +76,14 @@ func (e *wsExecutor) execute(query string) ([]any, error) {
 		return nil, err
 	}
 	if err := e.writeFrame(0x1, payload); err != nil {
-		_ = e.close()
+		_ = e.Close()
 		e.conn = nil
 		return nil, err
 	}
 	for {
 		message, err := e.readJSON()
 		if err != nil {
-			_ = e.close()
+			_ = e.Close()
 			e.conn = nil
 			return nil, err
 		}
@@ -104,15 +97,13 @@ func (e *wsExecutor) execute(query string) ([]any, error) {
 				continue
 			}
 			var response struct {
-				Type      string `json:"type"`
-				RequestID string `json:"request_id"`
-				Results   []any  `json:"results"`
+				Results []any `json:"results"`
 			}
 			if err := json.Unmarshal(message, &response); err != nil {
 				return nil, err
 			}
 			return response.Results, nil
-		case "error":
+		case "error", "overloaded":
 			if envelope.RequestID != "" && envelope.RequestID != reqID {
 				continue
 			}
@@ -126,7 +117,7 @@ func (e *wsExecutor) execute(query string) ([]any, error) {
 	}
 }
 
-func (e *wsExecutor) connect() error {
+func (e *Executor) connect() error {
 	wsURL, err := wsURLForAddr(e.addr, e.token)
 	if err != nil {
 		return err
@@ -140,7 +131,7 @@ func (e *wsExecutor) connect() error {
 	return nil
 }
 
-func (e *wsExecutor) ensureConnected() error {
+func (e *Executor) ensureConnected() error {
 	if e.conn != nil {
 		return nil
 	}
@@ -248,7 +239,7 @@ func dialWebSocket(rawURL, token string) (net.Conn, *bufio.ReadWriter, error) {
 	return conn, rw, nil
 }
 
-func (e *wsExecutor) readJSON() ([]byte, error) {
+func (e *Executor) readJSON() ([]byte, error) {
 	for {
 		opcode, payload, err := e.readFrame()
 		if err != nil {
@@ -267,7 +258,7 @@ func (e *wsExecutor) readJSON() ([]byte, error) {
 	}
 }
 
-func (e *wsExecutor) readFrame() (byte, []byte, error) {
+func (e *Executor) readFrame() (byte, []byte, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(e.rw, header); err != nil {
 		return 0, nil, err
@@ -298,7 +289,7 @@ func (e *wsExecutor) readFrame() (byte, []byte, error) {
 	return opcode, payload, nil
 }
 
-func (e *wsExecutor) writeFrame(opcode byte, payload []byte) error {
+func (e *Executor) writeFrame(opcode byte, payload []byte) error {
 	e.writeMu.Lock()
 	defer e.writeMu.Unlock()
 

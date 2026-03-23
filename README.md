@@ -25,6 +25,13 @@
 <a href="https://mail.google.com/mail/?view=cm&fs=1&to=realpaerpang@gmail.com">
   Contact me with Gmail
 </a>
+
+
+<h3 align="center">Community Projects</h3>
+
+<p align="center">
+  <a href="https://pap.anhe.impaer.xyz/">Ai tourism planning</a>
+
 </p>
 
 ## Overview

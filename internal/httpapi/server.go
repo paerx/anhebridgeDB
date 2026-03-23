@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/paerx/anhebridgedb/internal/auth"
+	"github.com/paerx/anhebridgedb/internal/config"
 	"github.com/paerx/anhebridgedb/internal/db"
 	"github.com/paerx/anhebridgedb/internal/dsl"
 	"github.com/paerx/anhebridgedb/internal/storage"
@@ -20,16 +22,29 @@ type Server struct {
 	dsl    *dsl.Executor
 	auth   *auth.Manager
 	mux    *http.ServeMux
+	adm    *admissionController
+	wsOnly bool
 }
 
-func New(engine *db.Engine, authManager *auth.Manager) *Server {
+func New(engine *db.Engine, authManager *auth.Manager, perf config.PerformanceConfig) *Server {
 	server := &Server{
 		engine: engine,
 		dsl:    dsl.New(engine),
 		auth:   authManager,
 		mux:    http.NewServeMux(),
+		adm: newAdmissionController(
+			perf.IngressMaxInFlight,
+			perf.IngressMaxQueue,
+			time.Duration(perf.IngressQueueTimeoutMS)*time.Millisecond,
+		),
 	}
 	server.routes()
+	return server
+}
+
+func NewWithConfig(engine *db.Engine, authManager *auth.Manager, cfg config.Config) *Server {
+	server := New(engine, authManager, cfg.Performance)
+	server.wsOnly = cfg.Transport.WSOnlyMode
 	return server
 }
 
@@ -40,21 +55,30 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/auth/login", s.handleLogin)
-	s.mux.Handle("/metrics/history", s.withAuth(http.HandlerFunc(s.handleMetricsHistory)))
-	s.mux.Handle("/stats", s.withAuth(http.HandlerFunc(s.handleStats)))
-	s.mux.Handle("/metrics", s.withAuth(http.HandlerFunc(s.handleMetrics)))
-	s.mux.Handle("/debug/perf", s.withAuth(http.HandlerFunc(s.handleDebugPerf)))
+	s.mux.Handle("/metrics/history", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleMetricsHistory))))
+	s.mux.Handle("/stats", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleStats))))
+	s.mux.Handle("/metrics", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleMetrics))))
+	s.mux.Handle("/debug/perf", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleDebugPerf))))
 	s.mux.Handle("/ws", http.HandlerFunc(s.handleWS))
-	s.mux.Handle("/snapshot", s.withAuth(http.HandlerFunc(s.handleSnapshot)))
-	s.mux.Handle("/admin/verify", s.withAuth(http.HandlerFunc(s.handleVerify)))
-	s.mux.Handle("/admin/compact", s.withAuth(http.HandlerFunc(s.handleCompact)))
-	s.mux.Handle("/admin/export", s.withAuth(http.HandlerFunc(s.handleExport)))
-	s.mux.Handle("/admin/import", s.withAuth(http.HandlerFunc(s.handleImport)))
-	s.mux.Handle("/dsl", s.withAuth(http.HandlerFunc(s.handleDSL)))
-	s.mux.Handle("/rules", s.withAuth(http.HandlerFunc(s.handleRules)))
-	s.mux.Handle("/rules/", s.withAuth(http.HandlerFunc(s.handleRule)))
-	s.mux.Handle("/tasks", s.withAuth(http.HandlerFunc(s.handleTasks)))
-	s.mux.Handle("/kv/", s.withAuth(http.HandlerFunc(s.handleKV)))
+	s.mux.Handle("/snapshot", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleSnapshot))))
+	s.mux.Handle("/admin/verify", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleVerify))))
+	s.mux.Handle("/admin/compact", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleCompact))))
+	s.mux.Handle("/admin/export", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleExport))))
+	s.mux.Handle("/admin/import", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleImport))))
+	s.mux.Handle("/dsl", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleDSL))))
+	s.mux.Handle("/rules", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleRules))))
+	s.mux.Handle("/rules/", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleRule))))
+	s.mux.Handle("/tasks", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleTasks))))
+	s.mux.Handle("/kv/", s.withAuth(s.httpAPIGuard(http.HandlerFunc(s.handleKV))))
+}
+
+func (s *Server) httpAPIGuard(next http.Handler) http.Handler {
+	if !s.wsOnly {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "http api disabled: ws_only_mode=true", http.StatusUpgradeRequired)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -124,7 +148,11 @@ func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.Metrics())
+	payload := s.engine.Metrics()
+	for k, v := range s.adm.metrics() {
+		payload[k] = v
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleMetricsHistory(w http.ResponseWriter, r *http.Request) {
@@ -470,12 +498,25 @@ func (s *Server) handleDSL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.dsl.Execute(body.Query)
+	results, err := s.executeDSL(r.Context(), body.Query)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, errAdmissionQueueFull) || errors.Is(err, errAdmissionTimeout) {
+			status = http.StatusTooManyRequests
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (s *Server) executeDSL(ctx context.Context, query string) ([]any, error) {
+	release, err := s.adm.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.dsl.Execute(query)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

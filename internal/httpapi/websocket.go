@@ -112,8 +112,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		switch strings.ToLower(strings.TrimSpace(req.Type)) {
 		case "exec":
-			results, err := s.dsl.Execute(req.Query)
+			results, err := s.executeDSL(r.Context(), req.Query)
 			if err != nil {
+				if errors.Is(err, errAdmissionQueueFull) || errors.Is(err, errAdmissionTimeout) {
+					_ = conn.WriteJSON(map[string]any{"type": "overloaded", "request_id": req.RequestID, "error": err.Error()})
+					continue
+				}
 				_ = conn.WriteJSON(map[string]any{"type": "error", "request_id": req.RequestID, "error": err.Error()})
 				continue
 			}

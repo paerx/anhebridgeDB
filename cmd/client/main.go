@@ -14,7 +14,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
+
+	"github.com/paerx/anhebridgedb/internal/clientws"
 )
 
 type request struct {
@@ -140,7 +143,7 @@ func repl(client *http.Client, store *authState, addr string) error {
 	if err != nil {
 		return err
 	}
-	defer ws.close()
+	defer ws.Close()
 
 	ed, err := newEditor(int(os.Stdin.Fd()))
 	if err != nil {
@@ -178,7 +181,7 @@ func repl(client *http.Client, store *authState, addr string) error {
 						fmt.Fprintln(os.Stderr, err)
 						return
 					}
-					_ = ws.updateToken(addr, store)
+					_ = updateExecutorToken(ws, addr, store)
 				})
 				continue
 			case "logout":
@@ -192,7 +195,7 @@ func repl(client *http.Client, store *authState, addr string) error {
 						store.Username = ""
 						store.ExpiresAt = time.Time{}
 					}
-					_ = ws.updateToken(addr, store)
+					_ = updateExecutorToken(ws, addr, store)
 					fmt.Println("logged out")
 				})
 				continue
@@ -229,12 +232,12 @@ func runOnce(store *authState, addr, query string) error {
 	if err != nil {
 		return err
 	}
-	defer ws.close()
+	defer ws.Close()
 	return runOnceWithWS(ws, query)
 }
 
-func runOnceWithWS(ws *wsExecutor, query string) error {
-	results, err := ws.execute(query)
+func runOnceWithWS(ws *clientws.Executor, query string) error {
+	results, err := ws.Execute(query)
 	if err != nil {
 		return err
 	}
@@ -244,6 +247,22 @@ func runOnceWithWS(ws *wsExecutor, query string) error {
 	}
 	fmt.Println(string(formatted))
 	return nil
+}
+
+func newWSExecutor(addr string, store *authState) (*clientws.Executor, error) {
+	token := ""
+	if store != nil && strings.TrimRight(store.Addr, "/") == strings.TrimRight(addr, "/") {
+		token = strings.TrimSpace(store.Token)
+	}
+	return clientws.New(addr, token)
+}
+
+func updateExecutorToken(e *clientws.Executor, addr string, store *authState) error {
+	token := ""
+	if store != nil && strings.TrimRight(store.Addr, "/") == strings.TrimRight(addr, "/") {
+		token = strings.TrimSpace(store.Token)
+	}
+	return e.Update(addr, token)
 }
 
 func loginFlow(client *http.Client, store *authState, addr string) error {
@@ -503,16 +522,12 @@ func (e *editor) redraw(prompt string, line []rune, cursor int) {
 }
 
 func readKey(fd int) (keyEvent, error) {
-	var buf [3]byte
-	n, err := syscall.Read(fd, buf[:1])
+	first, err := readByte(fd)
 	if err != nil {
 		return keyEvent{}, err
 	}
-	if n == 0 {
-		return keyEvent{}, io.EOF
-	}
 
-	switch buf[0] {
+	switch first {
 	case 3:
 		return keyEvent{kind: keyCtrlC}, nil
 	case 4:
@@ -524,11 +539,16 @@ func readKey(fd int) (keyEvent, error) {
 	case '\t':
 		return keyEvent{kind: keyTab}, nil
 	case 27:
-		if _, err := syscall.Read(fd, buf[1:3]); err != nil {
+		second, err := readByte(fd)
+		if err != nil {
 			return keyEvent{kind: keyNull}, nil
 		}
-		if buf[1] == '[' {
-			switch buf[2] {
+		if second == '[' {
+			third, err := readByte(fd)
+			if err != nil {
+				return keyEvent{kind: keyNull}, nil
+			}
+			switch third {
 			case 'A':
 				return keyEvent{kind: keyUp}, nil
 			case 'B':
@@ -541,7 +561,52 @@ func readKey(fd int) (keyEvent, error) {
 		}
 		return keyEvent{kind: keyNull}, nil
 	default:
-		return keyEvent{kind: keyRune, r: rune(buf[0])}, nil
+		if first < utf8.RuneSelf {
+			return keyEvent{kind: keyRune, r: rune(first)}, nil
+		}
+		need := utf8CharLen(first)
+		if need <= 1 {
+			return keyEvent{kind: keyRune, r: rune(first)}, nil
+		}
+		buf := make([]byte, 1, need)
+		buf[0] = first
+		for len(buf) < need {
+			b, err := readByte(fd)
+			if err != nil {
+				return keyEvent{}, err
+			}
+			buf = append(buf, b)
+		}
+		r, _ := utf8.DecodeRune(buf)
+		if r == utf8.RuneError {
+			return keyEvent{kind: keyRune, r: rune(first)}, nil
+		}
+		return keyEvent{kind: keyRune, r: r}, nil
+	}
+}
+
+func readByte(fd int) (byte, error) {
+	var b [1]byte
+	n, err := syscall.Read(fd, b[:])
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return b[0], nil
+}
+
+func utf8CharLen(first byte) int {
+	switch {
+	case first&0xE0 == 0xC0:
+		return 2
+	case first&0xF0 == 0xE0:
+		return 3
+	case first&0xF8 == 0xF0:
+		return 4
+	default:
+		return 1
 	}
 }
 
