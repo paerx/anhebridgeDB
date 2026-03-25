@@ -1,0 +1,398 @@
+:root {
+  --bg-app: #f3f5f8;
+  --bg-panel: #ffffff;
+  --bg-sidebar: #f0f1f3;
+  --line: #d6dbe3;
+  --text: #1d232b;
+  --muted: #5d6878;
+  --blue: #1d63ed;
+  --blue-strong: #0f52d7;
+  --radius: 10px;
+  --shadow: 0 8px 24px rgba(16, 36, 80, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  background: var(--bg-app);
+  font-family: "Space Grotesk", "Manrope", "Segoe UI", sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.docker-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.docker-topbar {
+  height: 64px;
+  background: var(--blue);
+  color: #fff;
+  display: grid;
+  grid-template-columns: 220px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.docker-brand {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.docker-search input {
+  width: 100%;
+  height: 42px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  padding: 0 12px;
+}
+
+.docker-search input::placeholder {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.docker-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.session-chip {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  color: #fff;
+}
+
+.docker-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.docker-sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--line);
+  padding: 14px;
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.side-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.side-item:hover {
+  background: #e7ebf1;
+}
+
+.side-item.active {
+  background: #dde3ec;
+  border-color: #c9d0dd;
+}
+
+.side-title {
+  display: block;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.side-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.docker-main {
+  padding: 18px;
+  overflow: auto;
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 36px;
+  line-height: 1.1;
+}
+
+.page-head p {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.page-body {
+  margin-top: 14px;
+}
+
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.card h2 {
+  margin: 0;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+input,
+textarea,
+select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: #fff;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: var(--blue-strong);
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+.metrics-presets {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.preset-btn {
+  border: 1px solid #c9d5e8;
+  background: #f3f7ff;
+  color: #28486f;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.preset-btn:hover {
+  background: #e8f0ff;
+}
+
+.preset-btn.active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.preset-custom {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px dashed #c7cfdd;
+  color: #6a7588;
+  background: #f8f9fc;
+}
+
+.preset-custom.active {
+  border-style: solid;
+  border-color: #d78d17;
+  color: #8d580f;
+  background: #fff4de;
+}
+
+.row.split {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.status {
+  padding: 8px 10px;
+  border: 1px solid #d8e2f5;
+  border-radius: 8px;
+  background: #f5f8ff;
+  color: #496081;
+}
+
+.muted {
+  color: var(--muted);
+  margin: 0;
+}
+
+.grafana-panel {
+  border: 1px solid #cad5e6;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f7ff 100%);
+  padding: 10px;
+}
+
+.grafana-title {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #4d6588;
+  margin-bottom: 8px;
+}
+
+.grafana-chart {
+  border: 1px solid #d3deed;
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px;
+}
+
+.metrics-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.metric-mini-card {
+  border: 1px solid #d5dfef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+}
+
+.metric-mini-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.metric-mini-name {
+  font-size: 12px;
+  color: #4d6588;
+  word-break: break-all;
+}
+
+.metric-mini-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #223754;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  padding: 8px 6px;
+  vertical-align: top;
+  background: #fff;
+}
+
+th {
+  background: #f7f9fc;
+}
+
+pre {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #f8fbff;
+  overflow: auto;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 1024px) {
+  .docker-topbar {
+    grid-template-columns: 1fr;
+    height: auto;
+    padding: 10px;
+  }
+
+  .docker-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .docker-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .row,
+  .row.split {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

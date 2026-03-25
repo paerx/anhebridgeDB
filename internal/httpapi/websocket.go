@@ -25,6 +25,7 @@ type wsConn struct {
 
 type wsRequest struct {
 	Type            string `json:"type"`
+	Token           string `json:"token,omitempty"`
 	Query           string `json:"query,omitempty"`
 	Topic           string `json:"topic,omitempty"`
 	IntervalSeconds int    `json:"interval_seconds,omitempty"`
@@ -32,10 +33,6 @@ type wsRequest struct {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeRequest(r); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	conn, err := upgradeWebSocket(w, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -51,6 +48,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	closeDone := func() {
 		closeOnce.Do(func() { close(done) })
 	}
+	authRequired := s.auth != nil && s.auth.Enabled()
+	authed := !authRequired
+
+	requireAuth := func(requestID string) bool {
+		if authed {
+			return true
+		}
+		_ = conn.WriteJSON(map[string]any{
+			"type":       "error",
+			"request_id": requestID,
+			"code":       "unauthorized",
+			"error":      "authentication required",
+		})
+		_ = conn.Close()
+		closeDone()
+		return false
+	}
+
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -111,7 +126,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch strings.ToLower(strings.TrimSpace(req.Type)) {
+		case "auth":
+			if !authRequired {
+				authed = true
+				_ = conn.WriteJSON(map[string]any{"type": "authed"})
+				continue
+			}
+			token := strings.TrimSpace(req.Token)
+			if token == "" {
+				_ = conn.WriteJSON(map[string]any{"type": "error", "code": "unauthorized", "error": "missing token"})
+				_ = conn.Close()
+				closeDone()
+				return
+			}
+			if _, err := s.auth.Verify(token); err != nil {
+				_ = conn.WriteJSON(map[string]any{"type": "error", "code": "unauthorized", "error": "invalid token"})
+				_ = conn.Close()
+				closeDone()
+				return
+			}
+			authed = true
+			_ = conn.WriteJSON(map[string]any{"type": "authed"})
 		case "exec":
+			if !requireAuth(req.RequestID) {
+				return
+			}
 			results, err := s.executeDSL(r.Context(), req.Query)
 			if err != nil {
 				if errors.Is(err, errAdmissionQueueFull) || errors.Is(err, errAdmissionTimeout) {
@@ -123,6 +162,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = conn.WriteJSON(map[string]any{"type": "result", "request_id": req.RequestID, "results": results})
 		case "subscribe":
+			if !requireAuth(req.RequestID) {
+				return
+			}
 			topic := strings.ToLower(strings.TrimSpace(req.Topic))
 			if topic != "metrics" && topic != "stats" {
 				_ = conn.WriteJSON(map[string]any{"type": "error", "error": "unsupported topic"})
@@ -138,6 +180,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			subscriptionsMu.Unlock()
 			_ = conn.WriteJSON(map[string]any{"type": "subscribed", "topic": topic, "interval_seconds": int(interval / time.Second)})
 		case "unsubscribe":
+			if !requireAuth(req.RequestID) {
+				return
+			}
 			subscriptionsMu.Lock()
 			topic := strings.ToLower(strings.TrimSpace(req.Topic))
 			delete(subscriptions, topic)

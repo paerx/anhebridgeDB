@@ -36,6 +36,26 @@
 
 ## Overview
 
+## Release Notes
+
+### v1.0.3
+
+- Added a separated `dashboard/` frontend (React + Vite) with Docker-style layout.
+- Added pages: `Connection`, `Workbench`, `Data Explorer`, `Metrics`, `Import / Export`.
+- Data Explorer timeline now shows `old_value` for rollback inspection.
+- Metrics page now supports compact per-metric mini charts and wildcard metric selectors:
+  - `*cpu`, `*mem`, `*io`, `*lat`, `*heap_alloc_bytes`, `*gc_pause_total_ms`.
+- Added backend runtime metrics for observability:
+  - CPU: `cpu_percent`, `cpu_cores_used`
+  - Memory: `memory_alloc_mb`, `memory_inuse_mb`, `memory_sys_mb`, `memory_heap_usage_percent`
+  - IO: `io_read_ops_per_sec`, `io_write_ops_per_sec`, `io_write_bytes_per_sec`, `io_write_mb_per_sec`
+  - Avg latency: `get_avg_ms`, `set_avg_ms`, `append_avg_ms`, `timeline_avg_ms`
+- Security hardening for frontend-backend connectivity:
+  - Removed WS query token auth (`?token=`); switched to WS first-frame `auth`.
+  - Session token storage changed from `localStorage` to `sessionStorage` with expiry cleanup.
+  - CORS changed to allowlist mode (`localhost:5173`, `127.0.0.1:5173`, plus `ANHEBRIDGE_CORS_ORIGINS`).
+  - Import/Export page adds file type/size checks, confirmation, and duplicate-submit guard.
+
 ## Contact
 
 - Email: [realpaerpang@gmail.com](mailto:realpaerpang@gmail.com)
