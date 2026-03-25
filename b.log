@@ -31,3 +31,34 @@ Validation:
 Notes:
 - Transfer hotspot bottleneck still exists for single main-account key contention.
 - Next phase should prioritize account sharding and further async persistence tuning.
+
+2026-03-25 v1.0.3 release log
+
+Scope:
+- Ship separated dashboard frontend and improve operational observability/security.
+
+Changes:
+1) Dashboard
+- Added `dashboard/` app with pages: Connection, Workbench, Data Explorer, Metrics, Import/Export.
+- Docker-like shell layout (top blue bar + left nav + content panels).
+- Data Explorer timeline includes `old_value`.
+
+2) Metrics UX + backend metric coverage
+- Metrics supports wildcard selectors (`*cpu`, `*mem`, `*io`, `*lat`, etc.).
+- Metrics UI uses compact per-metric mini charts for clearer scale isolation.
+- Added runtime metrics:
+  - CPU: cpu_percent, cpu_cores_used
+  - MEM: memory_alloc_mb, memory_inuse_mb, memory_sys_mb, memory_heap_usage_percent
+  - IO: io_read_ops_per_sec, io_write_ops_per_sec, io_write_bytes_per_sec, io_write_mb_per_sec
+  - Avg latency: get_avg_ms, set_avg_ms, append_avg_ms, timeline_avg_ms
+
+3) Security hardening
+- WebSocket no longer authenticates via URL query token.
+- WS now requires first-frame auth before exec/subscribe/unsubscribe.
+- Token storage moved to sessionStorage with expiry cleanup.
+- CORS changed to allowlist with env extension (`ANHEBRIDGE_CORS_ORIGINS`).
+- Import/Export added file validation, size cap, confirmation, and duplicate-submit guard.
+
+Validation:
+- go test ./... passed
+- dashboard npm run build passed

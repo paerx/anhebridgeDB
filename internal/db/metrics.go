@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -50,13 +51,19 @@ func (m *opMetric) snapshot(prefix string) map[string]any {
 		}
 	}
 	sort.Float64s(values)
-	p50, p95 := 0.0, 0.0
+	p50, p95, avg := 0.0, 0.0, 0.0
 	if len(values) > 0 {
 		p50 = percentile(values, 0.50)
 		p95 = percentile(values, 0.95)
+		sum := 0.0
+		for _, v := range values {
+			sum += v
+		}
+		avg = sum / float64(len(values))
 	}
 	return map[string]any{
 		prefix + "_count":  atomic.LoadUint64(&m.count),
+		prefix + "_avg_ms": avg,
 		prefix + "_p50_ms": p50,
 		prefix + "_p95_ms": p95,
 	}
@@ -88,6 +95,12 @@ type perfMetrics struct {
 	keyIndexFlush *opMetric
 	scheduler     *opMetric
 	recovery      *opMetric
+	deriveMu      sync.Mutex
+	lastSampleAt  time.Time
+	lastCPUSec    float64
+	lastSegBytes  float64
+	lastReadOps   uint64
+	lastWriteOps  uint64
 }
 
 func newPerfMetrics() *perfMetrics {
@@ -115,12 +128,18 @@ func observe(metric *opMetric, start time.Time) {
 func (e *Engine) Metrics() map[string]any {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
+	cpuSec := runtimeCPUTotalSeconds()
+	goroutines := runtime.NumGoroutine()
 
 	metrics := map[string]any{
 		"heap_alloc_bytes":     mem.HeapAlloc,
 		"heap_inuse_bytes":     mem.HeapInuse,
 		"heap_objects":         mem.HeapObjects,
+		"memory_alloc_mb":      float64(mem.HeapAlloc) / (1024.0 * 1024.0),
+		"memory_inuse_mb":      float64(mem.HeapInuse) / (1024.0 * 1024.0),
+		"memory_sys_mb":        float64(mem.Sys) / (1024.0 * 1024.0),
 		"gc_pause_total_ms":    float64(mem.PauseTotalNs) / 1_000_000.0,
+		"goroutines":           goroutines,
 		"state_keys":           e.countStateKeys(),
 		"loaded_event_refs":    e.countEventRefs(),
 		"segment_count":        e.log.Stats()["segments"],
@@ -131,6 +150,11 @@ func (e *Engine) Metrics() map[string]any {
 		"manifest_bytes":       totalManifestBytes(filepath.Join(e.dataDir, "log")),
 	}
 	now := time.Now().UTC()
+	if mem.Sys > 0 {
+		metrics["memory_heap_usage_percent"] = (float64(mem.HeapAlloc) / float64(mem.Sys)) * 100.0
+	} else {
+		metrics["memory_heap_usage_percent"] = 0.0
+	}
 	dueTasks, overdueTasks, oldestAge := e.bucketBacklog(now)
 	metrics["pending_tasks"] = e.pendingTasksLocked()
 	metrics["due_tasks"] = dueTasks
@@ -172,7 +196,65 @@ func (e *Engine) Metrics() map[string]any {
 	for k, v := range e.eventCache.stats() {
 		metrics[k] = v
 	}
+	e.decorateDerivedRuntimeMetrics(metrics, now, cpuSec)
 	return metrics
+}
+
+func (e *Engine) decorateDerivedRuntimeMetrics(metrics map[string]any, now time.Time, cpuSec float64) {
+	readOps := opCount(e.metrics.get) + opCount(e.metrics.getAt) + opCount(e.metrics.timeline) + opCount(e.metrics.check)
+	writeOps := opCount(e.metrics.set) + opCount(e.metrics.aset) + opCount(e.metrics.append)
+	segBytes := anyToFloat64(metrics["segment_total_bytes"])
+
+	e.metrics.deriveMu.Lock()
+	defer e.metrics.deriveMu.Unlock()
+
+	metrics["cpu_percent"] = 0.0
+	metrics["cpu_cores_used"] = 0.0
+	metrics["io_read_ops_per_sec"] = 0.0
+	metrics["io_write_ops_per_sec"] = 0.0
+	metrics["io_write_bytes_per_sec"] = 0.0
+	metrics["io_write_mb_per_sec"] = 0.0
+
+	if !e.metrics.lastSampleAt.IsZero() {
+		elapsed := now.Sub(e.metrics.lastSampleAt).Seconds()
+		if elapsed > 0 {
+			dCPU := cpuSec - e.metrics.lastCPUSec
+			if dCPU < 0 {
+				dCPU = 0
+			}
+			coresUsed := dCPU / elapsed
+			cpuPercent := 0.0
+			if runtime.NumCPU() > 0 {
+				cpuPercent = coresUsed * 100.0 / float64(runtime.NumCPU())
+			}
+			if cpuPercent < 0 {
+				cpuPercent = 0
+			}
+			metrics["cpu_cores_used"] = coresUsed
+			metrics["cpu_percent"] = cpuPercent
+
+			dSeg := segBytes - e.metrics.lastSegBytes
+			if dSeg < 0 {
+				dSeg = 0
+			}
+			writeBps := dSeg / elapsed
+			metrics["io_write_bytes_per_sec"] = writeBps
+			metrics["io_write_mb_per_sec"] = writeBps / (1024.0 * 1024.0)
+
+			if readOps >= e.metrics.lastReadOps {
+				metrics["io_read_ops_per_sec"] = float64(readOps-e.metrics.lastReadOps) / elapsed
+			}
+			if writeOps >= e.metrics.lastWriteOps {
+				metrics["io_write_ops_per_sec"] = float64(writeOps-e.metrics.lastWriteOps) / elapsed
+			}
+		}
+	}
+
+	e.metrics.lastSampleAt = now
+	e.metrics.lastCPUSec = cpuSec
+	e.metrics.lastSegBytes = segBytes
+	e.metrics.lastReadOps = readOps
+	e.metrics.lastWriteOps = writeOps
 }
 
 func (e *Engine) StartMetricsSampler(ctx context.Context, interval time.Duration) {
@@ -261,6 +343,51 @@ func numericMetrics(snapshot map[string]any) map[string]float64 {
 		}
 	}
 	return out
+}
+
+func runtimeCPUTotalSeconds() float64 {
+	samples := []runtimemetrics.Sample{
+		{Name: "/cpu/classes/total:cpu-seconds"},
+		{Name: "/cpu/classes/user:cpu-seconds"},
+		{Name: "/cpu/classes/gc/total:cpu-seconds"},
+	}
+	runtimemetrics.Read(samples)
+	total := sampleFloat64(samples[0])
+	if total > 0 {
+		return total
+	}
+	return sampleFloat64(samples[1]) + sampleFloat64(samples[2])
+}
+
+func sampleFloat64(sample runtimemetrics.Sample) float64 {
+	if sample.Value.Kind() == runtimemetrics.KindFloat64 {
+		return sample.Value.Float64()
+	}
+	return 0
+}
+
+func opCount(metric *opMetric) uint64 {
+	if metric == nil {
+		return 0
+	}
+	return atomic.LoadUint64(&metric.count)
+}
+
+func anyToFloat64(value any) float64 {
+	switch v := value.(type) {
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	default:
+		return 0
+	}
 }
 
 func storageFileSize(path string) int64 {

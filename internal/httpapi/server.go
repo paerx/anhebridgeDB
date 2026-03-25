@@ -49,7 +49,7 @@ func NewWithConfig(engine *db.Engine, authManager *auth.Manager, cfg config.Conf
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return withCORS(s.mux)
 }
 
 func (s *Server) routes() {
@@ -101,9 +101,6 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 func (s *Server) authorizeRequest(r *http.Request) (auth.Claims, error) {
 	if s.auth == nil || !s.auth.Enabled() {
 		return auth.Claims{}, nil
-	}
-	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
-		return s.auth.Verify(token)
 	}
 	token, err := auth.BearerToken(r.Header.Get("Authorization"))
 	if err != nil {
