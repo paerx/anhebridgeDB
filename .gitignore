@@ -11,9 +11,7 @@ docs/*
 
 # www
 Anhewww/*
-
 docswww/*
 
-dashboard
-
-dashboard/**/*
+# dashboard (local frontend workspace, do not publish)
+/dashboard/
