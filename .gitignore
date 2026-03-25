@@ -13,3 +13,7 @@ docs/*
 Anhewww/*
 
 docswww/*
+
+dashboard
+
+dashboard/**/*
