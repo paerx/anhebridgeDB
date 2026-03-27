@@ -2,6 +2,12 @@
 .gitignore
 .idea
 .gocache
+.DS_Store
+b.log
 data/log
 data/snapshot
 sdkdemo
+dashboard/
+dashboard/node_modules
+dashboard/dist
+dashboard/.vite

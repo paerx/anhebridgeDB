@@ -2,6 +2,7 @@ package dsl
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -251,5 +252,74 @@ func TestExecuteGetRawAndSuperValueExpansion(t *testing.T) {
 	}
 	if len(expanded) != 2 {
 		t.Fatalf("unexpected expanded refs count: %d", len(expanded))
+	}
+}
+
+func TestExecuteTxnAutoAbortAndReadableInTxn(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	if _, err := exec.Execute(`
+		ANHE AGAIN();
+		SET tx:key {"v":1};
+	`); err == nil {
+		t.Fatal("expected open transaction to fail and auto-abort")
+	}
+
+	if _, err := engine.Set("tx:key", json.RawMessage(`{"v":2}`)); err != nil {
+		t.Fatalf("expected lock released after auto-abort: %v", err)
+	}
+
+	results, err := exec.Execute(`
+		ANHE AGAIN();
+		SET tx:visible {"v":10};
+		GET tx:visible;
+		ANHE COMMIT();
+	`)
+	if err != nil {
+		t.Fatalf("transactional read/commit failed: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("expected 4 statement results, got %d", len(results))
+	}
+	record, ok := results[2].(db.Record)
+	if !ok {
+		t.Fatalf("expected db.Record, got %T", results[2])
+	}
+	if string(record.Value) != `{"v":10}` {
+		t.Fatalf("unexpected in-txn record: %s", record.Value)
+	}
+}
+
+func TestExecuteTxnRejectsTimelineAndDeleteVisibility(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	if _, err := exec.Execute(`SET tx:base {"v":1};`); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+
+	if _, err := exec.Execute(`
+		ANHE AGAIN();
+		GET tx:base ALLTIME;
+	`); err == nil {
+		t.Fatal("expected timeline query to be rejected in transaction")
+	}
+
+	if _, err := exec.Execute(`
+		ANHE AGAIN();
+		DELETE tx:base;
+		GET tx:base;
+		ANHE ABORT();
+	`); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("expected in-txn delete to make key invisible, got %v", err)
 	}
 }
