@@ -50,6 +50,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	authRequired := s.auth != nil && s.auth.Enabled()
 	authed := !authRequired
+	if authRequired {
+		if _, err := s.authorizeWSHandshake(r); err == nil {
+			authed = true
+		}
+	}
 
 	requireAuth := func(requestID string) bool {
 		if authed {

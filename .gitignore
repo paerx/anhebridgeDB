@@ -1,5 +1,6 @@
 # Go build cache
 .gocache/
+bin/
 
 # Local runtime data
 data/**/*.anhe

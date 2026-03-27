@@ -22,36 +22,87 @@ func New(engine *db.Engine) *Executor {
 func (e *Executor) Execute(input string) ([]any, error) {
 	statements := splitStatements(input)
 	results := make([]any, 0, len(statements))
+	currentTxnID := ""
 	for _, stmt := range statements {
-		result, err := e.executeOne(stmt)
+		result, err := e.executeOne(stmt, &currentTxnID)
 		if err != nil {
+			if currentTxnID != "" {
+				_ = e.engine.AbortTxn(currentTxnID)
+			}
 			return nil, err
 		}
 		results = append(results, result)
 	}
+	if currentTxnID != "" {
+		_ = e.engine.AbortTxn(currentTxnID)
+		return nil, fmt.Errorf("transaction %s is still open; transaction auto-aborted", currentTxnID)
+	}
 	return results, nil
 }
 
-func (e *Executor) executeOne(statement string) (any, error) {
+func (e *Executor) executeOne(statement string, currentTxnID *string) (any, error) {
 	stmt := strings.TrimSpace(statement)
 	switch {
+	case strings.EqualFold(stmt, "ANHE AGAIN()") || strings.EqualFold(stmt, "ANHE AGAIN"):
+		if *currentTxnID != "" {
+			return nil, fmt.Errorf("transaction already active: %s", *currentTxnID)
+		}
+		id, err := e.engine.BeginTxn()
+		if err != nil {
+			return nil, err
+		}
+		*currentTxnID = id
+		return map[string]any{"txn_id": id, "status": "active"}, nil
+	case strings.EqualFold(stmt, "ANHE COMMIT()") || strings.EqualFold(stmt, "ANHE COMMIT"):
+		if *currentTxnID == "" {
+			return nil, fmt.Errorf("no active transaction")
+		}
+		events, err := e.engine.CommitTxn(*currentTxnID)
+		if err != nil {
+			return nil, err
+		}
+		id := *currentTxnID
+		*currentTxnID = ""
+		return map[string]any{"txn_id": id, "status": "committed", "events": events}, nil
+	case strings.EqualFold(stmt, "ANHE ABORT()") || strings.EqualFold(stmt, "ANHE ABORT"):
+		if *currentTxnID == "" {
+			return nil, fmt.Errorf("no active transaction")
+		}
+		id := *currentTxnID
+		if err := e.engine.AbortTxn(id); err != nil {
+			return nil, err
+		}
+		*currentTxnID = ""
+		return map[string]any{"txn_id": id, "status": "aborted"}, nil
 	case strings.HasPrefix(strings.ToUpper(stmt), "ASET "):
-		return e.executeASet(stmt)
+		return e.executeASet(stmt, *currentTxnID)
 	case strings.HasPrefix(strings.ToUpper(stmt), "AGET "):
 		return e.executeAGet(stmt)
 	case strings.HasPrefix(strings.ToUpper(stmt), "SET "):
-		return e.executeSet(stmt)
+		return e.executeSet(stmt, *currentTxnID)
 	case strings.HasPrefix(strings.ToUpper(stmt), "GET "):
-		return e.executeGet(stmt)
+		return e.executeGet(stmt, *currentTxnID)
 	case strings.HasPrefix(strings.ToUpper(stmt), "SEARCH "):
+		if *currentTxnID != "" {
+			return nil, fmt.Errorf("SEARCH is not supported inside active transaction")
+		}
 		return e.executeSearch(stmt)
 	case strings.HasPrefix(strings.ToUpper(stmt), "DELETE "):
-		return e.executeDelete(stmt)
+		return e.executeDelete(stmt, *currentTxnID)
 	case strings.HasPrefix(strings.ToUpper(stmt), "ROLLBACK "):
+		if *currentTxnID != "" {
+			return nil, fmt.Errorf("ROLLBACK is not supported inside active transaction")
+		}
 		return e.executeRollback(stmt)
 	case strings.HasPrefix(strings.ToUpper(stmt), "CHECK "):
+		if *currentTxnID != "" {
+			return nil, fmt.Errorf("CHECK is not supported inside active transaction")
+		}
 		return e.executeCheck(stmt)
 	case strings.EqualFold(stmt, "SNAPSHOT"):
+		if *currentTxnID != "" {
+			return nil, fmt.Errorf("SNAPSHOT is not supported inside active transaction")
+		}
 		return e.engine.Snapshot()
 	case strings.EqualFold(stmt, "VERIFY STORAGE"):
 		return e.engine.VerifyStorage()
@@ -75,7 +126,7 @@ func (e *Executor) executeOne(statement string) (any, error) {
 	}
 }
 
-func (e *Executor) executeSet(stmt string) (any, error) {
+func (e *Executor) executeSet(stmt, txnID string) (any, error) {
 	parts := strings.SplitN(stmt, " ", 3)
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("invalid SET statement")
@@ -83,6 +134,12 @@ func (e *Executor) executeSet(stmt string) (any, error) {
 	payload, err := parseSetPayload(parts[2])
 	if err != nil {
 		return nil, err
+	}
+	if txnID != "" {
+		if err := e.engine.TxnSet(txnID, parts[1], payload.Value, payload.EventName, payload.IdempotencyKey); err != nil {
+			return nil, err
+		}
+		return map[string]any{"txn_id": txnID, "queued": "SET", "key": parts[1]}, nil
 	}
 	if payload.IdempotencyKey != "" {
 		return e.engine.SetWithIdempotencyKey(parts[1], payload.Value, payload.EventName, payload.IdempotencyKey)
@@ -93,7 +150,7 @@ func (e *Executor) executeSet(stmt string) (any, error) {
 	return e.engine.Set(parts[1], payload.Value)
 }
 
-func (e *Executor) executeASet(stmt string) (any, error) {
+func (e *Executor) executeASet(stmt, txnID string) (any, error) {
 	payload := strings.TrimSpace(stmt[len("ASET "):])
 	itemsText, err := splitCommaSegments(payload)
 	if err != nil {
@@ -127,6 +184,14 @@ func (e *Executor) executeASet(stmt string) (any, error) {
 			IdempotencyKey: value.IdempotencyKey,
 		})
 	}
+	if txnID != "" {
+		for _, item := range items {
+			if err := e.engine.TxnSet(txnID, item.Key, item.Value, item.EventName, item.IdempotencyKey); err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"txn_id": txnID, "queued": "ASET", "count": len(items)}, nil
+	}
 	return e.engine.BatchSet(items)
 }
 
@@ -147,12 +212,27 @@ func (e *Executor) executeAGet(stmt string) (any, error) {
 	return e.engine.BatchGet(keys), nil
 }
 
-func (e *Executor) executeGet(stmt string) (any, error) {
+func (e *Executor) executeGet(stmt, txnID string) (any, error) {
 	raw := false
 	rawRe := regexp.MustCompile(`(?i)\s+RAW$`)
 	if rawRe.MatchString(stmt) && !strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
 		raw = true
 		stmt = strings.TrimSpace(rawRe.ReplaceAllString(stmt, ""))
+	}
+	if txnID != "" {
+		simple := regexp.MustCompile(`(?i)^GET\s+(\S+)$`)
+		matches := simple.FindStringSubmatch(stmt)
+		if len(matches) != 2 {
+			return nil, fmt.Errorf("only GET <key> is supported inside active transaction")
+		}
+		record, err := e.engine.GetInTxn(txnID, matches[1])
+		if err != nil {
+			return nil, err
+		}
+		if raw {
+			return record.Value, nil
+		}
+		return record, nil
 	}
 
 	if strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
@@ -217,10 +297,16 @@ func (e *Executor) executeTimelineQuery(stmt string) (any, error) {
 	return e.engine.TimelineWindow(matches[1], withDiff, limit, before, after)
 }
 
-func (e *Executor) executeDelete(stmt string) (any, error) {
+func (e *Executor) executeDelete(stmt, txnID string) (any, error) {
 	parts := strings.Fields(stmt)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid DELETE statement")
+	}
+	if txnID != "" {
+		if err := e.engine.TxnDelete(txnID, parts[1]); err != nil {
+			return nil, err
+		}
+		return map[string]any{"txn_id": txnID, "queued": "DELETE", "key": parts[1]}, nil
 	}
 	return e.engine.Delete(parts[1])
 }

@@ -35,6 +35,8 @@ type TimelineEntry struct {
 	Key               string          `json:"key,omitempty"`
 	Timestamp         time.Time       `json:"timestamp"`
 	Operation         string          `json:"operation"`
+	TxnID             string          `json:"txn_id,omitempty"`
+	TxnOpSeq          uint64          `json:"txn_op_seq,omitempty"`
 	EventName         string          `json:"event_name,omitempty"`
 	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
 	IdempotencyHash   string          `json:"idempotency_hash,omitempty"`
@@ -163,6 +165,11 @@ type Engine struct {
 	searchByEvent  map[string][]storage.SearchIndexEntry
 	searchByIDKey  map[string][]storage.SearchIndexEntry
 	idempotency    map[string]storage.IdempotencyIndexEntry
+	txMu           sync.Mutex
+	txCounter      uint64
+	txns           map[string]*txnState
+	txKeyOwner     map[string]string
+	txnAppliedOps  map[string]map[uint64]struct{}
 }
 
 type indexFlushBatch struct {
@@ -203,6 +210,9 @@ func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg con
 		searchByEvent:  map[string][]storage.SearchIndexEntry{},
 		searchByIDKey:  map[string][]storage.SearchIndexEntry{},
 		idempotency:    map[string]storage.IdempotencyIndexEntry{},
+		txns:           map[string]*txnState{},
+		txKeyOwner:     map[string]string{},
+		txnAppliedOps:  map[string]map[uint64]struct{}{},
 	}
 
 	if err := engine.recover(); err != nil {
@@ -319,7 +329,14 @@ func (e *Engine) recover() error {
 			UpdatedAt:   event.Timestamp,
 		})
 		e.applyLocked(event)
+		e.markTxnOpApplied(event.TxnID, event.TxnOpSeq)
 	}
+	if err := e.recoverCommittedTransactions(); err != nil {
+		return err
+	}
+	e.txMu.Lock()
+	e.txnAppliedOps = map[string]map[uint64]struct{}{}
+	e.txMu.Unlock()
 	if needsSearchRebuild(searchIndexExists, lastEventID, searchEntries) || needsIdempotencyRebuild(idempotencyIndexExists, idempotencyEntries) {
 		if err := e.rebuildSecondaryIndexesLocked(); err != nil {
 			return err
@@ -512,6 +529,9 @@ func (e *Engine) BatchSet(items []BatchSetItem) ([]storage.Event, error) {
 	}
 	keys := make([]string, 0, len(items))
 	for _, item := range items {
+		if err := e.ensureWriteAllowed(item.Key, ""); err != nil {
+			return nil, err
+		}
 		keys = append(keys, item.Key)
 	}
 	unlock := e.lockKeys(keys)
@@ -610,6 +630,9 @@ func (e *Engine) BatchSet(items []BatchSetItem) ([]storage.Event, error) {
 func (e *Engine) setWithMeta(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey string, causeEventID uint64) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
+	if err := e.ensureWriteAllowed(key, ""); err != nil {
+		return storage.Event{}, err
+	}
 	unlock := e.lockKey(key)
 	defer unlock()
 
@@ -669,9 +692,80 @@ func (e *Engine) setWithMeta(key string, value json.RawMessage, source, actor, r
 	return persisted, nil
 }
 
+func (e *Engine) setWithMetaInTxn(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey, txnID string, txnOpSeq uint64, causeEventID uint64) (storage.Event, error) {
+	start := time.Now()
+	defer observe(e.metrics.set, start)
+	if err := e.ensureWriteAllowed(key, txnID); err != nil {
+		return storage.Event{}, err
+	}
+	unlock := e.lockKey(key)
+	defer unlock()
+
+	requestHash := ""
+	if idempotencyKey != "" {
+		var err error
+		requestHash, err = computeIdempotencyHash(key, eventName, value)
+		if err != nil {
+			return storage.Event{}, err
+		}
+		if existing, ok, err := e.resolveIdempotencyLocked(key, eventName, idempotencyKey, requestHash); err != nil {
+			return storage.Event{}, err
+		} else if ok {
+			return existing, nil
+		}
+	}
+
+	value, err := e.resolveValueLocked(key, value, eventName)
+	if err != nil {
+		return storage.Event{}, err
+	}
+	current, exists := e.loadState(key)
+	op := "CREATE"
+	if exists {
+		op = "UPDATE"
+	}
+	if ruleID != "" {
+		op = "AUTO_TRANSITION"
+	}
+
+	event := storage.Event{
+		Timestamp:         e.nextTimestampLocked(),
+		Key:               key,
+		Operation:         op,
+		TxnID:             txnID,
+		TxnOpSeq:          txnOpSeq,
+		EventName:         eventName,
+		IdempotencyKey:    idempotencyKey,
+		IdempotencyHash:   requestHash,
+		OldValue:          clone(current.Value),
+		NewValue:          clone(value),
+		Source:            source,
+		Actor:             actor,
+		RuleID:            ruleID,
+		CauseEventID:      causeEventID,
+		PrevVersionOffset: current.Version,
+	}
+	persisted, err := e.log.Append(event)
+	if err != nil {
+		return storage.Event{}, err
+	}
+	observe(e.metrics.append, start)
+	e.metaMu.Lock()
+	defer e.metaMu.Unlock()
+	e.applyPersistedLocked(persisted)
+	e.markTxnOpApplied(persisted.TxnID, persisted.TxnOpSeq)
+	if err := e.scheduleMatchingRulesLocked(persisted, true); err != nil {
+		return storage.Event{}, err
+	}
+	return persisted, nil
+}
+
 func (e *Engine) Delete(key string) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
+	if err := e.ensureWriteAllowed(key, ""); err != nil {
+		return storage.Event{}, err
+	}
 	unlock := e.lockKey(key)
 	defer unlock()
 
@@ -695,6 +789,41 @@ func (e *Engine) Delete(key string) (storage.Event, error) {
 	e.metaMu.Lock()
 	defer e.metaMu.Unlock()
 	e.applyPersistedLocked(persisted)
+	return persisted, nil
+}
+
+func (e *Engine) deleteInTxn(key, txnID string, txnOpSeq uint64) (storage.Event, error) {
+	start := time.Now()
+	defer observe(e.metrics.set, start)
+	if err := e.ensureWriteAllowed(key, txnID); err != nil {
+		return storage.Event{}, err
+	}
+	unlock := e.lockKey(key)
+	defer unlock()
+
+	current, exists := e.loadState(key)
+	if !exists {
+		return storage.Event{}, ErrNotFound
+	}
+	event := storage.Event{
+		Timestamp:         e.nextTimestampLocked(),
+		Key:               key,
+		Operation:         "DELETE",
+		TxnID:             txnID,
+		TxnOpSeq:          txnOpSeq,
+		OldValue:          clone(current.Value),
+		Source:            "txn",
+		Actor:             "txn",
+		PrevVersionOffset: current.Version,
+	}
+	persisted, err := e.log.Append(event)
+	if err != nil {
+		return storage.Event{}, err
+	}
+	e.metaMu.Lock()
+	defer e.metaMu.Unlock()
+	e.applyPersistedLocked(persisted)
+	e.markTxnOpApplied(persisted.TxnID, persisted.TxnOpSeq)
 	return persisted, nil
 }
 
@@ -805,6 +934,8 @@ func (e *Engine) TimelineWindow(key string, withDiff bool, limit int, beforeVers
 			Key:               event.Key,
 			Timestamp:         event.Timestamp,
 			Operation:         event.Operation,
+			TxnID:             event.TxnID,
+			TxnOpSeq:          event.TxnOpSeq,
 			EventName:         event.EventName,
 			IdempotencyKey:    event.IdempotencyKey,
 			IdempotencyHash:   event.IdempotencyHash,
@@ -1201,6 +1332,9 @@ func (e *Engine) Stats() map[string]any {
 }
 
 func (e *Engine) Rollback(key string, version uint64) (storage.Event, error) {
+	if err := e.ensureWriteAllowed(key, ""); err != nil {
+		return storage.Event{}, err
+	}
 	unlock := e.lockKey(key)
 	defer unlock()
 
@@ -1929,6 +2063,8 @@ func timelineEntryFromEvent(event storage.Event, withDiff bool) TimelineEntry {
 		Key:               event.Key,
 		Timestamp:         event.Timestamp,
 		Operation:         event.Operation,
+		TxnID:             event.TxnID,
+		TxnOpSeq:          event.TxnOpSeq,
 		EventName:         event.EventName,
 		IdempotencyKey:    event.IdempotencyKey,
 		IdempotencyHash:   event.IdempotencyHash,

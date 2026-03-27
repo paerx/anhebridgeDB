@@ -106,7 +106,28 @@ func (s *Server) authorizeRequest(r *http.Request) (auth.Claims, error) {
 	if err != nil {
 		return auth.Claims{}, err
 	}
-	return s.auth.Verify(token)
+	return s.authorizeToken(token)
+}
+
+func (s *Server) authorizeToken(token string) (auth.Claims, error) {
+	if s.auth == nil || !s.auth.Enabled() {
+		return auth.Claims{}, nil
+	}
+	return s.auth.Verify(strings.TrimSpace(token))
+}
+
+func (s *Server) authorizeWSHandshake(r *http.Request) (auth.Claims, error) {
+	if s.auth == nil || !s.auth.Enabled() {
+		return auth.Claims{}, nil
+	}
+	if token, err := auth.BearerToken(r.Header.Get("Authorization")); err == nil {
+		return s.authorizeToken(token)
+	}
+	queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if queryToken == "" {
+		return auth.Claims{}, auth.ErrInvalidToken
+	}
+	return s.authorizeToken(queryToken)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

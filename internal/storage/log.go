@@ -36,6 +36,8 @@ type Event struct {
 	Timestamp         time.Time       `json:"timestamp"`
 	Key               string          `json:"key"`
 	Operation         string          `json:"operation"`
+	TxnID             string          `json:"txn_id,omitempty"`
+	TxnOpSeq          uint64          `json:"txn_op_seq,omitempty"`
 	EventName         string          `json:"event_name,omitempty"`
 	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
 	IdempotencyHash   string          `json:"idempotency_hash,omitempty"`
