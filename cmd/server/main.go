@@ -30,7 +30,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	engine, err := db.OpenWithConfig(*dataDir, cfg.Storage.Segment, cfg.Performance, cfg.Storage.StrictRecovery)
+	engine, err := db.OpenWithStorageConfig(*dataDir, cfg.Storage, cfg.Performance)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}

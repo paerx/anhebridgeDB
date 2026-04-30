@@ -461,6 +461,46 @@ func TestRuleSchedulerAndRecovery(t *testing.T) {
 	}
 }
 
+func TestRuleSchedulerSupportsCustomField(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.CreateRule(RuleSpec{
+		ID:      "auto_analysis_voucher",
+		Field:   "status",
+		Pattern: "campaign_voucher:*:OPENED",
+		Delay:   "1s",
+		ToValue: "In AI analysis",
+	}); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+
+	event, err := engine.Set("campaign_voucher:1", json.RawMessage(`{"status":"OPENED","reward_type":"BTC"}`))
+	if err != nil {
+		t.Fatalf("set voucher: %v", err)
+	}
+
+	stats, err := engine.ProcessDueTasks(event.Timestamp.Add(2 * time.Second))
+	if err != nil {
+		t.Fatalf("process due tasks: %v", err)
+	}
+	if stats.Executed != 1 {
+		t.Fatalf("expected 1 executed task, got %d", stats.Executed)
+	}
+
+	record, err := engine.Get("campaign_voucher:1")
+	if err != nil {
+		t.Fatalf("get voucher: %v", err)
+	}
+	if got := extractFieldString(record.Value, "status"); got != "In AI analysis" {
+		t.Fatalf("expected status to become In AI analysis, got %q", got)
+	}
+}
+
 func TestCheckAllTimeDetectsTamper(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := Open(dir)

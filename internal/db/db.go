@@ -86,8 +86,10 @@ type CompactReport struct {
 
 type RuleSpec struct {
 	ID      string `json:"id"`
+	Field   string `json:"field,omitempty"`
 	Pattern string `json:"pattern"`
 	Target  string `json:"target"`
+	ToValue string `json:"to_value,omitempty"`
 	Delay   string `json:"delay"`
 	Enabled *bool  `json:"enabled,omitempty"`
 }
@@ -156,6 +158,13 @@ type Engine struct {
 	metrics        *perfMetrics
 	perfCfg        config.PerformanceConfig
 	indexFlushMode string
+	storageMode    string
+	durability     string
+	replicaWALAddr string
+	replicaWALTOms int
+	writeQueue     chan writeJob
+	writeStop      chan struct{}
+	writeWG        sync.WaitGroup
 	indexFlushCh   chan indexFlushBatch
 	indexFlushStop chan struct{}
 	indexFlushWG   sync.WaitGroup
@@ -178,15 +187,36 @@ type indexFlushBatch struct {
 	idEntries     []storage.IdempotencyIndexEntry
 }
 
+type writeJob struct {
+	run  func() (any, error)
+	done chan writeJobResult
+}
+
+type writeJobResult struct {
+	value any
+	err   error
+}
+
 func Open(dataDir string) (*Engine, error) {
 	cfg := config.Default()
-	return OpenWithConfig(dataDir, cfg.Storage.Segment, cfg.Performance, cfg.Storage.StrictRecovery)
+	return OpenWithStorageConfig(dataDir, cfg.Storage, cfg.Performance)
 }
 
 func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg config.PerformanceConfig, strictRecovery bool) (*Engine, error) {
+	storageCfg := config.StorageConfig{
+		Mode:           "normal",
+		Durability:     "safe",
+		ReplicaWAL:     config.ReplicaWALConfig{TimeoutMS: 1500},
+		Segment:        segmentCfg,
+		StrictRecovery: strictRecovery,
+	}
+	return OpenWithStorageConfig(dataDir, storageCfg, perfCfg)
+}
+
+func OpenWithStorageConfig(dataDir string, storageCfg config.StorageConfig, perfCfg config.PerformanceConfig) (*Engine, error) {
 	log, err := storage.OpenEventLog(filepath.Join(dataDir, "log"), storage.SegmentOptions{
-		MaxBytes:   segmentCfg.MaxBytes,
-		MaxRecords: segmentCfg.MaxRecords,
+		MaxBytes:   storageCfg.Segment.MaxBytes,
+		MaxRecords: storageCfg.Segment.MaxRecords,
 	})
 	if err != nil {
 		return nil, err
@@ -205,7 +235,11 @@ func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg con
 		metrics:        newPerfMetrics(),
 		perfCfg:        perfCfg,
 		indexFlushMode: normalizeIndexFlushMode(perfCfg.IndexFlushMode),
-		strictRecovery: strictRecovery,
+		storageMode:    normalizeStorageMode(storageCfg.Mode),
+		durability:     normalizeDurability(storageCfg.Durability),
+		replicaWALAddr: strings.TrimSpace(storageCfg.ReplicaWAL.Addr),
+		replicaWALTOms: normalizeReplicaTimeout(storageCfg.ReplicaWAL.TimeoutMS),
+		strictRecovery: storageCfg.StrictRecovery,
 		searchByKey:    map[string][]storage.SearchIndexEntry{},
 		searchByEvent:  map[string][]storage.SearchIndexEntry{},
 		searchByIDKey:  map[string][]storage.SearchIndexEntry{},
@@ -218,6 +252,9 @@ func OpenWithConfig(dataDir string, segmentCfg config.SegmentConfig, perfCfg con
 	if err := engine.recover(); err != nil {
 		_ = log.Close()
 		return nil, err
+	}
+	if engine.storageMode == "mem_only" {
+		engine.startWriteWorker()
 	}
 	if engine.indexFlushMode == "async" {
 		engine.startIndexFlushWorker()
@@ -482,6 +519,7 @@ func (e *Engine) CompactStorage() (CompactReport, error) {
 }
 
 func (e *Engine) Close() error {
+	e.stopWriteWorker()
 	e.stopIndexFlushWorker()
 	return e.log.Close()
 }
@@ -522,6 +560,22 @@ func (e *Engine) SetWithIdempotencyKey(key string, value json.RawMessage, eventN
 }
 
 func (e *Engine) BatchSet(items []BatchSetItem) ([]storage.Event, error) {
+	if e.shouldUseSingleWriter() {
+		value, err := e.submitWriteJob(func() (any, error) {
+			return e.batchSetDirect(items)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			return nil, nil
+		}
+		return value.([]storage.Event), nil
+	}
+	return e.batchSetDirect(items)
+}
+
+func (e *Engine) batchSetDirect(items []BatchSetItem) ([]storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.aset, start)
 	if len(items) == 0 {
@@ -628,6 +682,19 @@ func (e *Engine) BatchSet(items []BatchSetItem) ([]storage.Event, error) {
 }
 
 func (e *Engine) setWithMeta(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey string, causeEventID uint64) (storage.Event, error) {
+	if e.shouldUseSingleWriter() {
+		result, err := e.submitWriteJob(func() (any, error) {
+			return e.setWithMetaDirect(key, value, source, actor, ruleID, eventName, idempotencyKey, causeEventID)
+		})
+		if err != nil {
+			return storage.Event{}, err
+		}
+		return result.(storage.Event), nil
+	}
+	return e.setWithMetaDirect(key, value, source, actor, ruleID, eventName, idempotencyKey, causeEventID)
+}
+
+func (e *Engine) setWithMetaDirect(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey string, causeEventID uint64) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
 	if err := e.ensureWriteAllowed(key, ""); err != nil {
@@ -693,6 +760,19 @@ func (e *Engine) setWithMeta(key string, value json.RawMessage, source, actor, r
 }
 
 func (e *Engine) setWithMetaInTxn(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey, txnID string, txnOpSeq uint64, causeEventID uint64) (storage.Event, error) {
+	if e.shouldUseSingleWriter() {
+		result, err := e.submitWriteJob(func() (any, error) {
+			return e.setWithMetaInTxnDirect(key, value, source, actor, ruleID, eventName, idempotencyKey, txnID, txnOpSeq, causeEventID)
+		})
+		if err != nil {
+			return storage.Event{}, err
+		}
+		return result.(storage.Event), nil
+	}
+	return e.setWithMetaInTxnDirect(key, value, source, actor, ruleID, eventName, idempotencyKey, txnID, txnOpSeq, causeEventID)
+}
+
+func (e *Engine) setWithMetaInTxnDirect(key string, value json.RawMessage, source, actor, ruleID, eventName, idempotencyKey, txnID string, txnOpSeq uint64, causeEventID uint64) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
 	if err := e.ensureWriteAllowed(key, txnID); err != nil {
@@ -761,6 +841,19 @@ func (e *Engine) setWithMetaInTxn(key string, value json.RawMessage, source, act
 }
 
 func (e *Engine) Delete(key string) (storage.Event, error) {
+	if e.shouldUseSingleWriter() {
+		result, err := e.submitWriteJob(func() (any, error) {
+			return e.deleteDirect(key)
+		})
+		if err != nil {
+			return storage.Event{}, err
+		}
+		return result.(storage.Event), nil
+	}
+	return e.deleteDirect(key)
+}
+
+func (e *Engine) deleteDirect(key string) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
 	if err := e.ensureWriteAllowed(key, ""); err != nil {
@@ -793,6 +886,19 @@ func (e *Engine) Delete(key string) (storage.Event, error) {
 }
 
 func (e *Engine) deleteInTxn(key, txnID string, txnOpSeq uint64) (storage.Event, error) {
+	if e.shouldUseSingleWriter() {
+		result, err := e.submitWriteJob(func() (any, error) {
+			return e.deleteInTxnDirect(key, txnID, txnOpSeq)
+		})
+		if err != nil {
+			return storage.Event{}, err
+		}
+		return result.(storage.Event), nil
+	}
+	return e.deleteInTxnDirect(key, txnID, txnOpSeq)
+}
+
+func (e *Engine) deleteInTxnDirect(key, txnID string, txnOpSeq uint64) (storage.Event, error) {
 	start := time.Now()
 	defer observe(e.metrics.set, start)
 	if err := e.ensureWriteAllowed(key, txnID); err != nil {
@@ -1056,8 +1162,20 @@ func (e *Engine) CreateRule(spec RuleSpec) (storage.Rule, error) {
 	if spec.ID == "" {
 		return storage.Rule{}, errors.New("rule id is required")
 	}
-	if spec.Pattern == "" || spec.Target == "" || spec.Delay == "" {
-		return storage.Rule{}, errors.New("pattern, target and delay are required")
+	if spec.Pattern == "" || spec.Delay == "" {
+		return storage.Rule{}, errors.New("pattern and delay are required")
+	}
+	field := normalizeRuleField(spec.Field)
+	expectedValue, ok := parseRuleExpectedValue(spec.Pattern)
+	if !ok {
+		return storage.Rule{}, errors.New("invalid pattern: expected prefix:*:expected_value")
+	}
+	toValue := strings.TrimSpace(spec.ToValue)
+	if toValue == "" {
+		toValue, ok = parseRuleTargetValue(spec.Target)
+		if !ok {
+			return storage.Rule{}, errors.New("invalid target: expected prefix:{id}:to_value")
+		}
 	}
 	delay, err := time.ParseDuration(spec.Delay)
 	if err != nil {
@@ -1068,13 +1186,16 @@ func (e *Engine) CreateRule(spec RuleSpec) (storage.Rule, error) {
 		enabled = *spec.Enabled
 	}
 	rule := storage.Rule{
-		ID:           spec.ID,
-		Pattern:      spec.Pattern,
-		Target:       spec.Target,
-		Delay:        spec.Delay,
-		DelaySeconds: int64(delay / time.Second),
-		Enabled:      enabled,
-		CreatedAt:    time.Now().UTC(),
+		ID:            spec.ID,
+		Field:         field,
+		Pattern:       spec.Pattern,
+		Target:        spec.Target,
+		ExpectedValue: expectedValue,
+		ToValue:       toValue,
+		Delay:         spec.Delay,
+		DelaySeconds:  int64(delay / time.Second),
+		Enabled:       enabled,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if existing, ok := e.rules[rule.ID]; ok {
 		rule.CreatedAt = existing.CreatedAt
@@ -1167,7 +1288,8 @@ func (e *Engine) ProcessDueTasks(now time.Time) (SchedulerStats, error) {
 			e.metaMu.Lock()
 			task := *pending
 			record, ok := e.loadState(task.EntityKey)
-			if !ok || record.Version != task.ExpectedVersion || extractState(record.Value) != task.ExpectedState {
+			expectedField := normalizeRuleField(task.ExpectedField)
+			if !ok || record.Version != task.ExpectedVersion || extractFieldString(record.Value, expectedField) != task.ExpectedState {
 				nowCopy := now
 				task.Status = "skipped"
 				task.ProcessedAt = &nowCopy
@@ -1183,7 +1305,8 @@ func (e *Engine) ProcessDueTasks(now time.Time) (SchedulerStats, error) {
 				continue
 			}
 
-			nextValue, err := transitionValue(record.Value, task.ToState)
+			toField := normalizeRuleField(task.ToField)
+			nextValue, err := transitionFieldValue(record.Value, toField, task.ToState)
 			if err != nil {
 				nowCopy := now
 				task.Status = "skipped"
@@ -1314,16 +1437,21 @@ func (e *Engine) Stats() map[string]any {
 	eventRefs := e.eventRefs.count()
 	loadedEvents := e.eventCache.stats()["event_cache_items"].(int)
 	stats := map[string]any{
-		"keys":               keys,
-		"event_refs":         eventRefs,
-		"loaded_events":      loadedEvents,
-		"rules":              len(e.rules),
-		"tasks":              e.countAllTasksLocked(),
-		"pending_tasks":      e.pendingTasksLocked(),
-		"last_event_id":      e.lastEventIDLocked(),
-		"scheduler_runs":     atomic.LoadUint64(&e.schedulerRuns),
-		"scheduler_executed": atomic.LoadUint64(&e.schedulerExecs),
-		"scheduler_skipped":  atomic.LoadUint64(&e.schedulerSkips),
+		"keys":                   keys,
+		"event_refs":             eventRefs,
+		"loaded_events":          loadedEvents,
+		"rules":                  len(e.rules),
+		"tasks":                  e.countAllTasksLocked(),
+		"pending_tasks":          e.pendingTasksLocked(),
+		"last_event_id":          e.lastEventIDLocked(),
+		"scheduler_runs":         atomic.LoadUint64(&e.schedulerRuns),
+		"scheduler_executed":     atomic.LoadUint64(&e.schedulerExecs),
+		"scheduler_skipped":      atomic.LoadUint64(&e.schedulerSkips),
+		"storage_mode":           e.storageMode,
+		"durability_level":       e.durability,
+		"replica_wal_addr":       e.replicaWALAddr,
+		"replica_wal_timeout_ms": e.replicaWALTOms,
+		"write_queue_depth":      e.writeQueueDepth(),
 	}
 	for key, value := range e.log.Stats() {
 		stats[key] = value
@@ -1544,15 +1672,16 @@ func (e *Engine) applyLocked(event storage.Event) {
 }
 
 func (e *Engine) scheduleMatchingRulesLocked(event storage.Event, persist bool) error {
-	state := extractState(event.NewValue)
-	if state == "" {
-		return nil
-	}
 	for id, rule := range e.rules {
 		if !rule.Enabled {
 			continue
 		}
-		match, entityKey, _, toState := matchRule(rule, event.Key, state)
+		field := normalizeRuleField(rule.Field)
+		currentValue := extractFieldString(event.NewValue, field)
+		if currentValue == "" {
+			continue
+		}
+		match, entityKey, _, toValue := matchRule(rule, event.Key, currentValue)
 		if !match {
 			continue
 		}
@@ -1562,9 +1691,11 @@ func (e *Engine) scheduleMatchingRulesLocked(event storage.Event, persist bool) 
 			BucketTS:        event.Timestamp.Add(time.Duration(rule.DelaySeconds) * time.Second).UTC().Truncate(time.Minute),
 			RuleID:          id,
 			EntityKey:       entityKey,
+			ExpectedField:   field,
 			ExpectedVersion: event.EventID,
-			ExpectedState:   state,
-			ToState:         toState,
+			ExpectedState:   currentValue,
+			ToField:         field,
+			ToState:         toValue,
 			CauseEventID:    event.EventID,
 			Status:          "pending",
 			CreatedAt:       event.Timestamp,
@@ -1835,6 +1966,104 @@ func normalizeIndexFlushMode(mode string) string {
 	default:
 		return "sync"
 	}
+}
+
+func normalizeStorageMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "mem_only", "mem-only":
+		return "mem_only"
+	default:
+		return "normal"
+	}
+}
+
+func normalizeDurability(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "fast":
+		return "fast"
+	case "strict":
+		return "strict"
+	default:
+		return "safe"
+	}
+}
+
+func normalizeReplicaTimeout(v int) int {
+	if v <= 0 {
+		return 1500
+	}
+	return v
+}
+
+func (e *Engine) shouldUseSingleWriter() bool {
+	return e.storageMode == "mem_only"
+}
+
+func (e *Engine) submitWriteJob(run func() (any, error)) (any, error) {
+	if !e.shouldUseSingleWriter() || e.writeQueue == nil {
+		return run()
+	}
+	done := make(chan writeJobResult, 1)
+	job := writeJob{run: run, done: done}
+	select {
+	case e.writeQueue <- job:
+	case <-time.After(time.Duration(e.perfCfg.IngressQueueTimeoutMS) * time.Millisecond):
+		return nil, errors.New("write queue timeout")
+	}
+
+	switch e.durability {
+	case "fast", "safe", "strict":
+		// At this stage all durability levels wait queue execution completion.
+		// Once replica WAL is connected, fast/safe/strict will diverge on ack checkpoints.
+	}
+	result := <-done
+	return result.value, result.err
+}
+
+func (e *Engine) startWriteWorker() {
+	if e.writeQueue != nil {
+		return
+	}
+	queueSize := e.perfCfg.IngressMaxQueue
+	if queueSize <= 0 {
+		queueSize = 1024
+	}
+	e.writeQueue = make(chan writeJob, queueSize)
+	e.writeStop = make(chan struct{})
+	e.writeWG.Add(1)
+	go func() {
+		defer e.writeWG.Done()
+		for {
+			select {
+			case <-e.writeStop:
+				return
+			case job, ok := <-e.writeQueue:
+				if !ok {
+					return
+				}
+				value, err := job.run()
+				job.done <- writeJobResult{value: value, err: err}
+			}
+		}
+	}()
+}
+
+func (e *Engine) stopWriteWorker() {
+	if e.writeQueue == nil {
+		return
+	}
+	close(e.writeStop)
+	close(e.writeQueue)
+	e.writeWG.Wait()
+	e.writeQueue = nil
+	e.writeStop = nil
+}
+
+func (e *Engine) writeQueueDepth() int {
+	if e.writeQueue == nil {
+		return 0
+	}
+	return len(e.writeQueue)
 }
 
 func (e *Engine) keyLockIndex(key string) int {
@@ -2195,7 +2424,7 @@ func cloneRecord(record Record) Record {
 	return record
 }
 
-func extractState(value json.RawMessage) string {
+func extractFieldString(value json.RawMessage, field string) string {
 	if len(value) == 0 {
 		return ""
 	}
@@ -2203,30 +2432,41 @@ func extractState(value json.RawMessage) string {
 	if err := json.Unmarshal(value, &obj); err != nil {
 		return ""
 	}
-	if state, ok := obj["state"].(string); ok {
+	if state, ok := obj[field].(string); ok {
 		return state
 	}
 	return ""
 }
 
-func transitionValue(value json.RawMessage, toState string) (json.RawMessage, error) {
+func extractState(value json.RawMessage) string {
+	return extractFieldString(value, "state")
+}
+
+func transitionFieldValue(value json.RawMessage, field, toValue string) (json.RawMessage, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(value, &obj); err != nil {
 		return nil, err
 	}
-	obj["state"] = toState
+	obj[field] = toValue
 	return json.Marshal(obj)
 }
 
-func matchRule(rule storage.Rule, key, state string) (bool, string, string, string) {
-	parts := strings.Split(rule.Pattern, ":")
-	if len(parts) < 3 {
+func matchRule(rule storage.Rule, key, currentValue string) (bool, string, string, string) {
+	expectedValue := strings.TrimSpace(rule.ExpectedValue)
+	if expectedValue == "" {
+		var ok bool
+		expectedValue, ok = parseRuleExpectedValue(rule.Pattern)
+		if !ok {
+			return false, "", "", ""
+		}
+	}
+	if expectedValue != currentValue {
 		return false, "", "", ""
 	}
-	if parts[len(parts)-2] != "*" || parts[len(parts)-1] != state {
+	prefix, ok := parseRulePatternPrefix(rule.Pattern)
+	if !ok {
 		return false, "", "", ""
 	}
-	prefix := strings.Join(parts[:len(parts)-2], ":") + ":"
 	if !strings.HasPrefix(key, prefix) {
 		return false, "", "", ""
 	}
@@ -2234,11 +2474,60 @@ func matchRule(rule storage.Rule, key, state string) (bool, string, string, stri
 	if entityID == "" {
 		return false, "", "", ""
 	}
-	targetParts := strings.Split(rule.Target, ":")
-	if len(targetParts) == 0 {
+	toValue := strings.TrimSpace(rule.ToValue)
+	if toValue == "" {
+		var parsed bool
+		toValue, parsed = parseRuleTargetValue(rule.Target)
+		if !parsed {
+			return false, "", "", ""
+		}
+	}
+	if toValue == "" {
 		return false, "", "", ""
 	}
-	return true, key, entityID, targetParts[len(targetParts)-1]
+	return true, key, entityID, toValue
+}
+
+func normalizeRuleField(field string) string {
+	field = strings.TrimSpace(field)
+	if field == "" {
+		return "state"
+	}
+	return field
+}
+
+func parseRulePatternPrefix(pattern string) (string, bool) {
+	parts := strings.Split(pattern, ":")
+	if len(parts) < 3 {
+		return "", false
+	}
+	if parts[len(parts)-2] != "*" {
+		return "", false
+	}
+	return strings.Join(parts[:len(parts)-2], ":") + ":", true
+}
+
+func parseRuleExpectedValue(pattern string) (string, bool) {
+	parts := strings.Split(pattern, ":")
+	if len(parts) < 3 {
+		return "", false
+	}
+	if parts[len(parts)-2] != "*" {
+		return "", false
+	}
+	return parts[len(parts)-1], true
+}
+
+func parseRuleTargetValue(target string) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	parts := strings.Split(target, ":")
+	if len(parts) < 1 {
+		return "", false
+	}
+	return parts[len(parts)-1], true
 }
 
 func buildDiff(oldValue, newValue json.RawMessage) any {

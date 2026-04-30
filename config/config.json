@@ -10,6 +10,12 @@
     ]
   },
   "storage": {
+    "mode": "normal",
+    "durability": "safe",
+    "replica_wal": {
+      "addr": "",
+      "timeout_ms": 1500
+    },
     "strict_recovery": false,
     "segment": {
       "max_bytes": 67108864,
