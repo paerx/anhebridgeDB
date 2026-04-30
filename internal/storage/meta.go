@@ -10,16 +10,19 @@ import (
 )
 
 type Rule struct {
-	ID           string    `json:"id"`
-	Pattern      string    `json:"pattern"`
-	Target       string    `json:"target"`
-	Delay        string    `json:"delay"`
-	DelaySeconds int64     `json:"delay_seconds"`
-	Enabled      bool      `json:"enabled"`
-	CreatedAt    time.Time `json:"created_at"`
-	MatchCount   uint64    `json:"match_count"`
-	ExecuteCount uint64    `json:"execute_count"`
-	SkipCount    uint64    `json:"skip_count"`
+	ID            string    `json:"id"`
+	Field         string    `json:"field,omitempty"`
+	Pattern       string    `json:"pattern"`
+	Target        string    `json:"target"`
+	ExpectedValue string    `json:"expected_value,omitempty"`
+	ToValue       string    `json:"to_value,omitempty"`
+	Delay         string    `json:"delay"`
+	DelaySeconds  int64     `json:"delay_seconds"`
+	Enabled       bool      `json:"enabled"`
+	CreatedAt     time.Time `json:"created_at"`
+	MatchCount    uint64    `json:"match_count"`
+	ExecuteCount  uint64    `json:"execute_count"`
+	SkipCount     uint64    `json:"skip_count"`
 }
 
 type Task struct {
@@ -27,8 +30,10 @@ type Task struct {
 	BucketTS        time.Time  `json:"bucket_ts"`
 	RuleID          string     `json:"rule_id"`
 	EntityKey       string     `json:"entity_key"`
+	ExpectedField   string     `json:"expected_field,omitempty"`
 	ExpectedVersion uint64     `json:"expected_version"`
 	ExpectedState   string     `json:"expected_state"`
+	ToField         string     `json:"to_field,omitempty"`
 	ToState         string     `json:"to_state"`
 	CauseEventID    uint64     `json:"cause_event_id"`
 	Status          string     `json:"status"`
@@ -37,10 +42,10 @@ type Task struct {
 }
 
 type TaskBucketMeta struct {
-	BucketTS      time.Time `json:"bucket_ts"`
-	Path          string    `json:"path"`
-	Total         int       `json:"total"`
-	Pending       int       `json:"pending"`
+	BucketTS      time.Time  `json:"bucket_ts"`
+	Path          string     `json:"path"`
+	Total         int        `json:"total"`
+	Pending       int        `json:"pending"`
 	OldestPending *time.Time `json:"oldest_pending,omitempty"`
 }
 

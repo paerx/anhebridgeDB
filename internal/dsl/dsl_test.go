@@ -46,6 +46,41 @@ func TestExecuteEndToEnd(t *testing.T) {
 	}
 }
 
+func TestExecuteCreateRuleThenSetField(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	if _, err := exec.Execute(`
+		CREATE RULE auto_analysis_voucher
+		ON PATTERN "campaign_voucher:*:OPENED"
+		IF UNCHANGED FOR 1s
+		THEN SET status="In AI analysis";
+		SET campaign_voucher:42 {"status":"OPENED","reward_type":"BTC"};
+	`); err != nil {
+		t.Fatalf("execute rule dsl: %v", err)
+	}
+
+	if _, err := engine.ProcessDueTasks(time.Now().UTC().Add(2 * time.Second)); err != nil {
+		t.Fatalf("process tasks: %v", err)
+	}
+
+	record, err := engine.Get("campaign_voucher:42")
+	if err != nil {
+		t.Fatalf("get voucher: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(record.Value, &obj); err != nil {
+		t.Fatalf("decode value: %v", err)
+	}
+	if obj["status"] != "In AI analysis" {
+		t.Fatalf("expected updated status, got %v", obj["status"])
+	}
+}
+
 func TestExecuteCustomEventLastAndRollback(t *testing.T) {
 	engine, err := db.Open(t.TempDir())
 	if err != nil {

@@ -26,8 +26,16 @@ type AuthUser struct {
 }
 
 type StorageConfig struct {
-	Segment        SegmentConfig `json:"segment"`
-	StrictRecovery bool          `json:"strict_recovery"`
+	Mode           string           `json:"mode"`
+	Durability     string           `json:"durability"`
+	ReplicaWAL     ReplicaWALConfig `json:"replica_wal"`
+	Segment        SegmentConfig    `json:"segment"`
+	StrictRecovery bool             `json:"strict_recovery"`
+}
+
+type ReplicaWALConfig struct {
+	Addr      string `json:"addr"`
+	TimeoutMS int    `json:"timeout_ms"`
 }
 
 type PerformanceConfig struct {
@@ -64,6 +72,12 @@ func Default() Config {
 			Users:           []AuthUser{},
 		},
 		Storage: StorageConfig{
+			Mode:       "normal",
+			Durability: "safe",
+			ReplicaWAL: ReplicaWALConfig{
+				Addr:      "",
+				TimeoutMS: 1500,
+			},
 			Segment: SegmentConfig{
 				MaxBytes:   64 * 1024 * 1024,
 				MaxRecords: 30000,
@@ -111,6 +125,11 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Storage.Segment.MaxRecords < 0 {
 		cfg.Storage.Segment.MaxRecords = 0
+	}
+	cfg.Storage.Mode = normalizeStorageMode(cfg.Storage.Mode)
+	cfg.Storage.Durability = normalizeDurability(cfg.Storage.Durability)
+	if cfg.Storage.ReplicaWAL.TimeoutMS <= 0 {
+		cfg.Storage.ReplicaWAL.TimeoutMS = Default().Storage.ReplicaWAL.TimeoutMS
 	}
 	if cfg.Performance.EventCacheMaxItems <= 0 {
 		cfg.Performance.EventCacheMaxItems = Default().Performance.EventCacheMaxItems
@@ -166,5 +185,29 @@ func normalizeIndexFlushMode(mode string) string {
 		return "async"
 	default:
 		return "sync"
+	}
+}
+
+func normalizeStorageMode(mode string) string {
+	switch mode {
+	case "normal", "NORMAL":
+		return "normal"
+	case "mem_only", "MEM_ONLY", "mem-only", "MEM-ONLY":
+		return "mem_only"
+	default:
+		return "normal"
+	}
+}
+
+func normalizeDurability(level string) string {
+	switch level {
+	case "fast", "FAST":
+		return "fast"
+	case "safe", "SAFE":
+		return "safe"
+	case "strict", "STRICT":
+		return "strict"
+	default:
+		return "safe"
 	}
 }
