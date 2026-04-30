@@ -320,6 +320,17 @@ func (e *Executor) executeSearch(stmt string) (any, error) {
 }
 
 func (e *Executor) executeCreateRule(stmt string) (any, error) {
+	setRe := regexp.MustCompile(`(?is)^CREATE\s+RULE\s+([A-Za-z0-9_\-]+)\s+ON\s+PATTERN\s+"([^"]+)"\s+IF\s+UNCHANGED\s+FOR\s+([^\s]+)\s+THEN\s+SET\s+([A-Za-z0-9_]+)\s*=\s*"([^"]+)"$`)
+	if matches := setRe.FindStringSubmatch(stmt); len(matches) == 6 {
+		return e.engine.CreateRule(db.RuleSpec{
+			ID:      matches[1],
+			Pattern: matches[2],
+			Delay:   matches[3],
+			Field:   matches[4],
+			ToValue: matches[5],
+		})
+	}
+
 	re := regexp.MustCompile(`(?is)^CREATE\s+RULE\s+([A-Za-z0-9_\-]+)\s+ON\s+PATTERN\s+"([^"]+)"\s+IF\s+UNCHANGED\s+FOR\s+([^\s]+)\s+THEN\s+TRANSITION\s+TO\s+"([^"]+)"$`)
 	matches := re.FindStringSubmatch(stmt)
 	if len(matches) != 5 {
