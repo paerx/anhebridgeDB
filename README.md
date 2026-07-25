@@ -138,10 +138,15 @@ DELETE key;
 ```sql
 GET key;
 GET key RAW;
+GET key EXPAND ONLY /checkin,/owner,/rewards;
+GET key EXPAND EXCEPT /chests;
 AGET key1 key2 key3;
 AGET key1 key2 key3 RAW;
+AGET key1 key2 key3 EXPAND ONLY /checkin;
 GET key AT '2026-03-15T04:00:00Z';
+GET key AT '2026-03-15T04:00:00Z' EXPAND ONLY /checkin;
 GET key LAST;
+GET key LAST EXPAND EXCEPT /chests;
 GET key LAST -1 -1;
 GET key ALLTIME;
 GET key ALLTIME WITH DIFF;
@@ -160,6 +165,8 @@ SET uid-asan10 {"uid":"uid-asan10","owner":"0xdef","activated":false};
 SET usersVape ["*uid-hksn10","*uid-asan10"];
 GET usersVape;
 GET usersVape RAW;
+GET usersVape EXPAND ONLY /0;
+GET usersVape EXPAND EXCEPT /1;
 AGET usersVape uid-hksn10 RAW;
 ```
 
@@ -167,6 +174,10 @@ Behavior:
 
 - `GET/AGET` expands super values by default.
 - `GET RAW` and `AGET ... RAW` return stored raw value without expansion.
+- `EXPAND ONLY` resolves only the listed JSON Pointer paths; every other `*key` remains unchanged and is not read.
+- `EXPAND EXCEPT` resolves all super values except the listed paths.
+- multiple paths are comma-separated, for example `EXPAND ONLY /checkin,/owner,/rewards`.
+- array indexes and wildcards are supported, for example `/chests/0` and `/chests/*`.
 - expansion is read-only: no write-through to referenced keys.
 - circular references are rejected with `super_value_cycle_detected`.
 - depth/node/fanout are bounded by performance config.

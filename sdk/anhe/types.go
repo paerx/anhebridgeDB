@@ -73,6 +73,20 @@ type TimelineOptions struct {
 	AfterVersion  uint64
 }
 
+type ExpandMode string
+
+const (
+	ExpandAll    ExpandMode = "all"
+	ExpandNone   ExpandMode = "none"
+	ExpandOnly   ExpandMode = "only"
+	ExpandExcept ExpandMode = "except"
+)
+
+type GetOptions struct {
+	ExpandMode  ExpandMode
+	ExpandPaths []string
+}
+
 type BatchGetItem struct {
 	Key       string          `json:"key"`
 	Found     bool            `json:"found"`

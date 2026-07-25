@@ -84,23 +84,27 @@ func percentile(values []float64, p float64) float64 {
 }
 
 type perfMetrics struct {
-	get           *opMetric
-	getAt         *opMetric
-	timeline      *opMetric
-	check         *opMetric
-	set           *opMetric
-	aset          *opMetric
-	keyLockWait   *opMetric
-	append        *opMetric
-	keyIndexFlush *opMetric
-	scheduler     *opMetric
-	recovery      *opMetric
-	deriveMu      sync.Mutex
-	lastSampleAt  time.Time
-	lastCPUSec    float64
-	lastSegBytes  float64
-	lastReadOps   uint64
-	lastWriteOps  uint64
+	get            *opMetric
+	getAt          *opMetric
+	timeline       *opMetric
+	check          *opMetric
+	set            *opMetric
+	aset           *opMetric
+	keyLockWait    *opMetric
+	append         *opMetric
+	keyIndexFlush  *opMetric
+	scheduler      *opMetric
+	recovery       *opMetric
+	superResolve   *opMetric
+	superResolved  uint64
+	superPreserved uint64
+	superCacheHits uint64
+	deriveMu       sync.Mutex
+	lastSampleAt   time.Time
+	lastCPUSec     float64
+	lastSegBytes   float64
+	lastReadOps    uint64
+	lastWriteOps   uint64
 }
 
 func newPerfMetrics() *perfMetrics {
@@ -116,6 +120,7 @@ func newPerfMetrics() *perfMetrics {
 		keyIndexFlush: newOpMetric(1024),
 		scheduler:     newOpMetric(1024),
 		recovery:      newOpMetric(32),
+		superResolve:  newOpMetric(2048),
 	}
 }
 
@@ -132,27 +137,30 @@ func (e *Engine) Metrics() map[string]any {
 	goroutines := runtime.NumGoroutine()
 
 	metrics := map[string]any{
-		"heap_alloc_bytes":       mem.HeapAlloc,
-		"heap_inuse_bytes":       mem.HeapInuse,
-		"heap_objects":           mem.HeapObjects,
-		"memory_alloc_mb":        float64(mem.HeapAlloc) / (1024.0 * 1024.0),
-		"memory_inuse_mb":        float64(mem.HeapInuse) / (1024.0 * 1024.0),
-		"memory_sys_mb":          float64(mem.Sys) / (1024.0 * 1024.0),
-		"gc_pause_total_ms":      float64(mem.PauseTotalNs) / 1_000_000.0,
-		"goroutines":             goroutines,
-		"state_keys":             e.countStateKeys(),
-		"loaded_event_refs":      e.countEventRefs(),
-		"segment_count":          e.log.Stats()["segments"],
-		"segment_total_bytes":    e.log.Stats()["segment_total_bytes"],
-		"latest_index_bytes":     storageFileSize(storage.KeyIndexCurrentPath(e.dataDir)) + storageFileSize(storage.KeyIndexDeltaPath(e.dataDir)),
-		"position_index_bytes":   storageFileSize(storage.PositionIndexPath(e.dataDir)),
-		"snapshot_bytes":         storageFileSize(storage.SnapshotPath(e.dataDir)),
-		"manifest_bytes":         totalManifestBytes(filepath.Join(e.dataDir, "log")),
-		"storage_mode":           e.storageMode,
-		"durability_level":       e.durability,
-		"replica_wal_addr":       e.replicaWALAddr,
-		"replica_wal_timeout_ms": e.replicaWALTOms,
-		"write_queue_depth":      e.writeQueueDepth(),
+		"heap_alloc_bytes":                     mem.HeapAlloc,
+		"heap_inuse_bytes":                     mem.HeapInuse,
+		"heap_objects":                         mem.HeapObjects,
+		"memory_alloc_mb":                      float64(mem.HeapAlloc) / (1024.0 * 1024.0),
+		"memory_inuse_mb":                      float64(mem.HeapInuse) / (1024.0 * 1024.0),
+		"memory_sys_mb":                        float64(mem.Sys) / (1024.0 * 1024.0),
+		"gc_pause_total_ms":                    float64(mem.PauseTotalNs) / 1_000_000.0,
+		"goroutines":                           goroutines,
+		"state_keys":                           e.countStateKeys(),
+		"loaded_event_refs":                    e.countEventRefs(),
+		"segment_count":                        e.log.Stats()["segments"],
+		"segment_total_bytes":                  e.log.Stats()["segment_total_bytes"],
+		"latest_index_bytes":                   storageFileSize(storage.KeyIndexCurrentPath(e.dataDir)) + storageFileSize(storage.KeyIndexDeltaPath(e.dataDir)),
+		"position_index_bytes":                 storageFileSize(storage.PositionIndexPath(e.dataDir)),
+		"snapshot_bytes":                       storageFileSize(storage.SnapshotPath(e.dataDir)),
+		"manifest_bytes":                       totalManifestBytes(filepath.Join(e.dataDir, "log")),
+		"storage_mode":                         e.storageMode,
+		"durability_level":                     e.durability,
+		"replica_wal_addr":                     e.replicaWALAddr,
+		"replica_wal_timeout_ms":               e.replicaWALTOms,
+		"write_queue_depth":                    e.writeQueueDepth(),
+		"super_value_refs_resolved_total":      atomic.LoadUint64(&e.metrics.superResolved),
+		"super_value_subtrees_preserved_total": atomic.LoadUint64(&e.metrics.superPreserved),
+		"super_value_resolve_cache_hits_total": atomic.LoadUint64(&e.metrics.superCacheHits),
 	}
 	now := time.Now().UTC()
 	if mem.Sys > 0 {
@@ -196,6 +204,9 @@ func (e *Engine) Metrics() map[string]any {
 		metrics[k] = v
 	}
 	for k, v := range e.metrics.recovery.snapshot("recovery_duration") {
+		metrics[k] = v
+	}
+	for k, v := range e.metrics.superResolve.snapshot("super_value_resolve") {
 		metrics[k] = v
 	}
 	for k, v := range e.eventCache.stats() {

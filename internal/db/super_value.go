@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,10 +27,37 @@ const (
 )
 
 type readContext struct {
-	mode  readMode
-	at    time.Time
-	steps int
-	raw   bool
+	mode       readMode
+	at         time.Time
+	steps      int
+	raw        bool
+	expandMode SuperValueExpandMode
+	paths      *superValuePathMatcher
+}
+
+type SuperValueExpandMode string
+
+const (
+	SuperValueExpandAll    SuperValueExpandMode = "all"
+	SuperValueExpandNone   SuperValueExpandMode = "none"
+	SuperValueExpandOnly   SuperValueExpandMode = "only"
+	SuperValueExpandExcept SuperValueExpandMode = "except"
+)
+
+type ReadOptions struct {
+	ExpandMode  SuperValueExpandMode
+	ExpandPaths []string
+}
+
+type superValuePathNode struct {
+	children    map[string]*superValuePathNode
+	wildcard    *superValuePathNode
+	terminal    bool
+	hasTerminal bool
+}
+
+type superValuePathMatcher struct {
+	root *superValuePathNode
 }
 
 type resolveState struct {
@@ -57,15 +86,17 @@ func (e *Engine) resolveRecordForRead(key string, ctx readContext) (Record, erro
 	if err != nil {
 		return Record{}, err
 	}
-	if ctx.raw {
+	if ctx.raw || ctx.expandMode == SuperValueExpandNone {
 		return record, nil
 	}
 	if !hasSuperReference(record.Value) {
 		return record, nil
 	}
 
+	start := time.Now()
+	defer observe(e.metrics.superResolve, start)
 	state := newResolveState(e.perfCfg.SuperValueMaxDepth, e.perfCfg.SuperValueMaxFanout, e.perfCfg.SuperValueMaxNodes)
-	resolved, err := e.resolveJSONValue(key, record.Value, ctx, state, 0)
+	resolved, err := e.resolveJSONValue(key, record.Value, ctx, state, 0, nil)
 	if err != nil {
 		return Record{}, err
 	}
@@ -144,27 +175,32 @@ func (e *Engine) getLastRawLocked(key string, steps int) (Record, error) {
 	return Record{Value: clone(event.NewValue), Version: event.EventID, UpdatedAt: event.Timestamp}, nil
 }
 
-func (e *Engine) resolveJSONValue(currentKey string, raw json.RawMessage, ctx readContext, state *resolveState, depth int) (any, error) {
+func (e *Engine) resolveJSONValue(currentKey string, raw json.RawMessage, ctx readContext, state *resolveState, depth int, path []string) (any, error) {
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
-	return e.resolveAnyValue(currentKey, decoded, ctx, state, depth)
+	return e.resolveAnyValue(currentKey, decoded, ctx, state, depth, path)
 }
 
-func (e *Engine) resolveAnyValue(currentKey string, decoded any, ctx readContext, state *resolveState, depth int) (any, error) {
+func (e *Engine) resolveAnyValue(currentKey string, decoded any, ctx readContext, state *resolveState, depth int, path []string) (any, error) {
 	switch v := decoded.(type) {
 	case string:
 		refKey, isRef := parseSuperRef(v)
-		if !isRef {
+		if !isRef || !ctx.shouldExpand(path) {
+			if isRef {
+				atomic.AddUint64(&e.metrics.superPreserved, 1)
+			}
 			return v, nil
 		}
-		return e.resolveReference(currentKey, refKey, ctx, state, depth+1)
+		atomic.AddUint64(&e.metrics.superResolved, 1)
+		return e.resolveReference(currentKey, refKey, ctx, state, depth+1, path)
 	case []any:
 		refCount := 0
-		for _, item := range v {
+		for index, item := range v {
+			itemPath := appendJSONPath(path, strconv.Itoa(index))
 			if s, ok := item.(string); ok {
-				if _, isRef := parseSuperRef(s); isRef {
+				if _, isRef := parseSuperRef(s); isRef && ctx.shouldExpand(itemPath) {
 					refCount++
 				}
 			}
@@ -173,8 +209,14 @@ func (e *Engine) resolveAnyValue(currentKey string, decoded any, ctx readContext
 			return nil, fmt.Errorf("%w: key=%s fanout=%d max=%d", ErrSuperValueFanout, currentKey, refCount, state.maxFanout)
 		}
 		out := make([]any, 0, len(v))
-		for _, item := range v {
-			resolved, err := e.resolveAnyValue(currentKey, item, ctx, state, depth)
+		for index, item := range v {
+			itemPath := appendJSONPath(path, strconv.Itoa(index))
+			if !ctx.shouldTraverse(itemPath) {
+				atomic.AddUint64(&e.metrics.superPreserved, 1)
+				out = append(out, item)
+				continue
+			}
+			resolved, err := e.resolveAnyValue(currentKey, item, ctx, state, depth, itemPath)
 			if err != nil {
 				return nil, err
 			}
@@ -184,7 +226,13 @@ func (e *Engine) resolveAnyValue(currentKey string, decoded any, ctx readContext
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, value := range v {
-			resolved, err := e.resolveAnyValue(currentKey, value, ctx, state, depth)
+			childPath := appendJSONPath(path, key)
+			if !ctx.shouldTraverse(childPath) {
+				atomic.AddUint64(&e.metrics.superPreserved, 1)
+				out[key] = value
+				continue
+			}
+			resolved, err := e.resolveAnyValue(currentKey, value, ctx, state, depth, childPath)
 			if err != nil {
 				return nil, err
 			}
@@ -196,7 +244,7 @@ func (e *Engine) resolveAnyValue(currentKey string, decoded any, ctx readContext
 	}
 }
 
-func (e *Engine) resolveReference(currentKey, refKey string, ctx readContext, state *resolveState, depth int) (any, error) {
+func (e *Engine) resolveReference(currentKey, refKey string, ctx readContext, state *resolveState, depth int, path []string) (any, error) {
 	if state.maxDepth > 0 && depth > state.maxDepth {
 		return nil, fmt.Errorf("%w: key=%s ref=%s depth=%d max=%d", ErrSuperValueMaxDepth, currentKey, refKey, depth, state.maxDepth)
 	}
@@ -209,12 +257,17 @@ func (e *Engine) resolveReference(currentKey, refKey string, ctx readContext, st
 
 	cacheKey := refCacheKey(refKey, ctx)
 	if cached, ok := state.cache[cacheKey]; ok {
+		atomic.AddUint64(&e.metrics.superCacheHits, 1)
+		resolvedValue, err := e.resolveJSONValue(refKey, cached.Value, ctx, state, depth, path)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{
 			"key":        refKey,
 			"found":      true,
 			"version":    cached.Version,
 			"updated_at": cached.UpdatedAt,
-			"value":      mustDecodeAny(cached.Value),
+			"value":      resolvedValue,
 		}, nil
 	}
 	state.active[refKey] = struct{}{}
@@ -235,7 +288,7 @@ func (e *Engine) resolveReference(currentKey, refKey string, ctx readContext, st
 		return nil, err
 	}
 	state.cache[cacheKey] = record
-	resolvedValue, err := e.resolveJSONValue(refKey, record.Value, ctx, state, depth)
+	resolvedValue, err := e.resolveJSONValue(refKey, record.Value, ctx, state, depth, path)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +299,176 @@ func (e *Engine) resolveReference(currentKey, refKey string, ctx readContext, st
 		"updated_at": record.UpdatedAt,
 		"value":      resolvedValue,
 	}, nil
+}
+
+func prepareReadContext(ctx readContext, opts ReadOptions) (readContext, error) {
+	mode := opts.ExpandMode
+	if mode == "" {
+		mode = SuperValueExpandAll
+	}
+	switch mode {
+	case SuperValueExpandAll, SuperValueExpandNone:
+		if len(opts.ExpandPaths) > 0 {
+			return readContext{}, fmt.Errorf("super value paths require expand mode only or except")
+		}
+	case SuperValueExpandOnly, SuperValueExpandExcept:
+		matcher, err := newSuperValuePathMatcher(opts.ExpandPaths)
+		if err != nil {
+			return readContext{}, err
+		}
+		ctx.paths = matcher
+	default:
+		return readContext{}, fmt.Errorf("invalid super value expand mode: %s", mode)
+	}
+	ctx.expandMode = mode
+	return ctx, nil
+}
+
+func (ctx readContext) shouldExpand(path []string) bool {
+	switch ctx.expandMode {
+	case SuperValueExpandNone:
+		return false
+	case SuperValueExpandOnly:
+		ancestor, descendant := ctx.paths.relation(path)
+		return ancestor || descendant
+	case SuperValueExpandExcept:
+		ancestor, _ := ctx.paths.relation(path)
+		return !ancestor
+	default:
+		return true
+	}
+}
+
+func (ctx readContext) shouldTraverse(path []string) bool {
+	switch ctx.expandMode {
+	case SuperValueExpandNone:
+		return false
+	case SuperValueExpandOnly:
+		ancestor, descendant := ctx.paths.relation(path)
+		return ancestor || descendant
+	case SuperValueExpandExcept:
+		ancestor, _ := ctx.paths.relation(path)
+		return !ancestor
+	default:
+		return true
+	}
+}
+
+func newSuperValuePathMatcher(paths []string) (*superValuePathMatcher, error) {
+	root := &superValuePathNode{}
+	for _, input := range paths {
+		segments, err := parseSuperValuePath(input)
+		if err != nil {
+			return nil, err
+		}
+		node := root
+		for _, segment := range segments {
+			if segment == "*" {
+				if node.wildcard == nil {
+					node.wildcard = &superValuePathNode{}
+				}
+				node = node.wildcard
+				continue
+			}
+			if node.children == nil {
+				node.children = map[string]*superValuePathNode{}
+			}
+			child := node.children[segment]
+			if child == nil {
+				child = &superValuePathNode{}
+				node.children[segment] = child
+			}
+			node = child
+		}
+		node.terminal = true
+	}
+	markPathTerminals(root)
+	return &superValuePathMatcher{root: root}, nil
+}
+
+func parseSuperValuePath(input string) ([]string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" || input[0] != '/' {
+		return nil, fmt.Errorf("invalid super value path %q: path must start with /", input)
+	}
+	if input == "/" {
+		return nil, nil
+	}
+	rawSegments := strings.Split(strings.TrimPrefix(input, "/"), "/")
+	segments := make([]string, 0, len(rawSegments))
+	for _, segment := range rawSegments {
+		if segment == "" {
+			return nil, fmt.Errorf("invalid super value path %q: empty segment", input)
+		}
+		segment = strings.ReplaceAll(segment, "~1", "/")
+		segment = strings.ReplaceAll(segment, "~0", "~")
+		segments = append(segments, segment)
+	}
+	return segments, nil
+}
+
+func markPathTerminals(node *superValuePathNode) bool {
+	if node == nil {
+		return false
+	}
+	hasTerminal := node.terminal
+	for _, child := range node.children {
+		hasTerminal = markPathTerminals(child) || hasTerminal
+	}
+	hasTerminal = markPathTerminals(node.wildcard) || hasTerminal
+	node.hasTerminal = hasTerminal
+	return hasTerminal
+}
+
+func (m *superValuePathMatcher) relation(path []string) (ancestor, descendant bool) {
+	if m == nil || m.root == nil {
+		return false, false
+	}
+	nodes := []*superValuePathNode{m.root}
+	if m.root.terminal {
+		ancestor = true
+	}
+	for _, segment := range path {
+		next := make([]*superValuePathNode, 0, len(nodes)*2)
+		seen := map[*superValuePathNode]struct{}{}
+		for _, node := range nodes {
+			if child := node.children[segment]; child != nil {
+				if _, ok := seen[child]; !ok {
+					seen[child] = struct{}{}
+					next = append(next, child)
+				}
+			}
+			if node.wildcard != nil {
+				if _, ok := seen[node.wildcard]; !ok {
+					seen[node.wildcard] = struct{}{}
+					next = append(next, node.wildcard)
+				}
+			}
+		}
+		if len(next) == 0 {
+			return ancestor, false
+		}
+		nodes = next
+		for _, node := range nodes {
+			if node.terminal {
+				ancestor = true
+			}
+		}
+	}
+	for _, node := range nodes {
+		if node.hasTerminal {
+			descendant = true
+			break
+		}
+	}
+	return ancestor, descendant
+}
+
+func appendJSONPath(path []string, segment string) []string {
+	child := make([]string, len(path)+1)
+	copy(child, path)
+	child[len(path)] = segment
+	return child
 }
 
 func hasSuperReference(raw json.RawMessage) bool {

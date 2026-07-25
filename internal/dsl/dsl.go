@@ -196,30 +196,30 @@ func (e *Executor) executeASet(stmt, txnID string) (any, error) {
 }
 
 func (e *Executor) executeAGet(stmt string) (any, error) {
+	stmt, raw, readOpts, err := parseReadExpansion(stmt)
+	if err != nil {
+		return nil, err
+	}
 	payload := strings.TrimSpace(stmt[len("AGET "):])
 	if payload == "" {
 		return nil, fmt.Errorf("AGET requires at least one key")
-	}
-	raw := false
-	if strings.HasSuffix(strings.ToUpper(payload), " RAW") {
-		raw = true
-		payload = strings.TrimSpace(payload[:len(payload)-4])
 	}
 	keys := splitAGetKeys(payload)
 	if raw {
 		return e.engine.BatchGetRaw(keys), nil
 	}
-	return e.engine.BatchGet(keys), nil
+	return e.engine.BatchGetWithReadOptions(keys, readOpts)
 }
 
 func (e *Executor) executeGet(stmt, txnID string) (any, error) {
-	raw := false
-	rawRe := regexp.MustCompile(`(?i)\s+RAW$`)
-	if rawRe.MatchString(stmt) && !strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
-		raw = true
-		stmt = strings.TrimSpace(rawRe.ReplaceAllString(stmt, ""))
+	stmt, raw, readOpts, err := parseReadExpansion(stmt)
+	if err != nil {
+		return nil, err
 	}
 	if txnID != "" {
+		if readOpts.ExpandMode != "" {
+			return nil, fmt.Errorf("selective super value expansion is not supported inside active transaction")
+		}
 		simple := regexp.MustCompile(`(?i)^GET\s+(\S+)$`)
 		matches := simple.FindStringSubmatch(stmt)
 		if len(matches) != 2 {
@@ -236,6 +236,9 @@ func (e *Executor) executeGet(stmt, txnID string) (any, error) {
 	}
 
 	if strings.Contains(strings.ToUpper(stmt), "ALLTIME") {
+		if raw || readOpts.ExpandMode != "" {
+			return nil, fmt.Errorf("RAW and EXPAND are not supported with ALLTIME")
+		}
 		return e.executeTimelineQuery(stmt)
 	}
 	timelineWithDiff := regexp.MustCompile(`(?i)^GET\s+(\S+)\s+ALLTIME\s+WITH\s+DIFF$`)
@@ -257,7 +260,7 @@ func (e *Executor) executeGet(stmt, txnID string) (any, error) {
 		if raw {
 			return e.engine.GetAtRaw(matches[1], ts.UTC())
 		}
-		return e.engine.GetAt(matches[1], ts.UTC())
+		return e.engine.GetAtWithOptions(matches[1], ts.UTC(), readOpts)
 	}
 
 	last := regexp.MustCompile(`(?i)^GET\s+(\S+)\s+LAST(?:\s+(.+))?$`)
@@ -269,7 +272,7 @@ func (e *Executor) executeGet(stmt, txnID string) (any, error) {
 		if raw {
 			return e.engine.GetLastRaw(matches[1], steps)
 		}
-		return e.engine.GetLast(matches[1], steps)
+		return e.engine.GetLastWithOptions(matches[1], steps, readOpts)
 	}
 
 	latest := regexp.MustCompile(`(?i)^GET\s+(\S+)$`)
@@ -277,10 +280,59 @@ func (e *Executor) executeGet(stmt, txnID string) (any, error) {
 		if raw {
 			return e.engine.GetRaw(matches[1])
 		}
-		return e.engine.Get(matches[1])
+		return e.engine.GetWithOptions(matches[1], readOpts)
 	}
 
 	return nil, fmt.Errorf("invalid GET statement")
+}
+
+func parseReadExpansion(stmt string) (string, bool, db.ReadOptions, error) {
+	upper := strings.ToUpper(stmt)
+	hasRaw := regexp.MustCompile(`(?i)(?:^|\s)RAW(?:\s|$)`).MatchString(stmt)
+	hasExpand := strings.Contains(upper, " EXPAND ")
+	if hasRaw && hasExpand {
+		return "", false, db.ReadOptions{}, fmt.Errorf("RAW and EXPAND cannot be used together")
+	}
+
+	rawRe := regexp.MustCompile(`(?i)\s+RAW$`)
+	if rawRe.MatchString(stmt) {
+		return strings.TrimSpace(rawRe.ReplaceAllString(stmt, "")), true, db.ReadOptions{}, nil
+	}
+	if hasRaw {
+		return "", false, db.ReadOptions{}, fmt.Errorf("RAW must be the final GET or AGET option")
+	}
+
+	expandRe := regexp.MustCompile(`(?is)\s+EXPAND\s+(ONLY|EXCEPT)\s+(.+)$`)
+	matches := expandRe.FindStringSubmatch(stmt)
+	if len(matches) == 0 {
+		if hasExpand {
+			return "", false, db.ReadOptions{}, fmt.Errorf("invalid EXPAND option")
+		}
+		return stmt, false, db.ReadOptions{}, nil
+	}
+
+	pathsText := strings.TrimSpace(matches[2])
+	if pathsText == "" {
+		return "", false, db.ReadOptions{}, fmt.Errorf("EXPAND %s requires at least one path", strings.ToUpper(matches[1]))
+	}
+	pathParts := strings.Split(pathsText, ",")
+	paths := make([]string, 0, len(pathParts))
+	for _, path := range pathParts {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return "", false, db.ReadOptions{}, fmt.Errorf("EXPAND path cannot be empty")
+		}
+		paths = append(paths, path)
+	}
+
+	mode := db.SuperValueExpandOnly
+	if strings.EqualFold(matches[1], "EXCEPT") {
+		mode = db.SuperValueExpandExcept
+	}
+	return strings.TrimSpace(stmt[:len(stmt)-len(matches[0])]), false, db.ReadOptions{
+		ExpandMode:  mode,
+		ExpandPaths: paths,
+	}, nil
 }
 
 func (e *Executor) executeTimelineQuery(stmt string) (any, error) {

@@ -14,6 +14,7 @@ type KeySession struct {
 	key         string
 	event       string
 	idempotency string
+	getOptions  GetOptions
 }
 
 func (s *KeySession) Event(name string) *KeySession {
@@ -23,6 +24,16 @@ func (s *KeySession) Event(name string) *KeySession {
 
 func (s *KeySession) Idempotency(id string) *KeySession {
 	s.idempotency = strings.TrimSpace(id)
+	return s
+}
+
+func (s *KeySession) ExpandOnly(paths ...string) *KeySession {
+	s.getOptions = GetOptions{ExpandMode: ExpandOnly, ExpandPaths: append([]string(nil), paths...)}
+	return s
+}
+
+func (s *KeySession) ExpandExcept(paths ...string) *KeySession {
+	s.getOptions = GetOptions{ExpandMode: ExpandExcept, ExpandPaths: append([]string(nil), paths...)}
 	return s
 }
 
@@ -51,15 +62,33 @@ func (s *KeySession) Delete(ctx context.Context) (Event, error) {
 }
 
 func (s *KeySession) Get(ctx context.Context) (Record, error) {
-	results, err := s.db.ExecDSL(ctx, fmt.Sprintf("GET %s;", s.key))
+	return s.GetWithOptions(ctx, s.getOptions)
+}
+
+func (s *KeySession) GetWithOptions(ctx context.Context, opts GetOptions) (Record, error) {
+	query, err := buildReadQuery(fmt.Sprintf("GET %s", s.key), opts)
+	if err != nil {
+		return Record{}, err
+	}
+	results, err := s.db.ExecDSL(ctx, query)
 	if err != nil {
 		return Record{}, err
 	}
 	return decodeRecordResult(results)
 }
 
+func (s *KeySession) GetRaw(ctx context.Context) (Record, error) {
+	return s.GetWithOptions(ctx, GetOptions{ExpandMode: ExpandNone})
+}
+
 func (s *KeySession) At(ctx context.Context, at time.Time) (Record, error) {
-	query := fmt.Sprintf("GET %s AT '%s';", s.key, at.UTC().Format(time.RFC3339))
+	query, err := buildReadQuery(
+		fmt.Sprintf("GET %s AT '%s'", s.key, at.UTC().Format(time.RFC3339)),
+		s.getOptions,
+	)
+	if err != nil {
+		return Record{}, err
+	}
 	results, err := s.db.ExecDSL(ctx, query)
 	if err != nil {
 		return Record{}, err
@@ -72,7 +101,11 @@ func (s *KeySession) Last(ctx context.Context, steps int) (Record, error) {
 	for i := 1; i < steps; i++ {
 		query += " -1"
 	}
-	query += ";"
+	var err error
+	query, err = buildReadQuery(query, s.getOptions)
+	if err != nil {
+		return Record{}, err
+	}
 	results, err := s.db.ExecDSL(ctx, query)
 	if err != nil {
 		return Record{}, err
@@ -293,9 +326,10 @@ type batchSetItem struct {
 }
 
 type BatchSession struct {
-	db       *DB
-	setItems []batchSetItem
-	getKeys  []string
+	db         *DB
+	setItems   []batchSetItem
+	getKeys    []string
+	getOptions GetOptions
 }
 
 func (b *BatchSession) Set(key string, value any) *BatchSession {
@@ -330,6 +364,16 @@ func (b *BatchSession) Get(keys ...string) *BatchSession {
 		}
 		b.getKeys = append(b.getKeys, key)
 	}
+	return b
+}
+
+func (b *BatchSession) ExpandOnly(paths ...string) *BatchSession {
+	b.getOptions = GetOptions{ExpandMode: ExpandOnly, ExpandPaths: append([]string(nil), paths...)}
+	return b
+}
+
+func (b *BatchSession) ExpandExcept(paths ...string) *BatchSession {
+	b.getOptions = GetOptions{ExpandMode: ExpandExcept, ExpandPaths: append([]string(nil), paths...)}
 	return b
 }
 
@@ -371,7 +415,10 @@ func (b *BatchSession) ExecGet(ctx context.Context) ([]BatchGetItem, error) {
 	if len(b.getKeys) == 0 {
 		return nil, nil
 	}
-	query := "AGET " + strings.Join(b.getKeys, " ") + ";"
+	query, err := buildReadQuery("AGET "+strings.Join(b.getKeys, " "), b.getOptions)
+	if err != nil {
+		return nil, err
+	}
 	results, err := b.db.ExecDSL(ctx, query)
 	if err != nil {
 		return nil, err
@@ -384,4 +431,40 @@ func (b *BatchSession) ExecGet(ctx context.Context) ([]BatchGetItem, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func buildReadQuery(base string, opts GetOptions) (string, error) {
+	mode := opts.ExpandMode
+	if mode == "" || mode == ExpandAll {
+		if len(opts.ExpandPaths) > 0 {
+			return "", fmt.Errorf("expand paths require ExpandOnly or ExpandExcept")
+		}
+		return strings.TrimSpace(base) + ";", nil
+	}
+	if mode == ExpandNone {
+		if len(opts.ExpandPaths) > 0 {
+			return "", fmt.Errorf("ExpandNone does not accept paths")
+		}
+		return strings.TrimSpace(base) + " RAW;", nil
+	}
+	if mode != ExpandOnly && mode != ExpandExcept {
+		return "", fmt.Errorf("invalid expand mode: %s", mode)
+	}
+	if len(opts.ExpandPaths) == 0 {
+		return "", fmt.Errorf("%s requires at least one path", mode)
+	}
+
+	paths := make([]string, 0, len(opts.ExpandPaths))
+	for _, path := range opts.ExpandPaths {
+		path = strings.TrimSpace(path)
+		if path == "" || !strings.HasPrefix(path, "/") {
+			return "", fmt.Errorf("invalid expand path %q: path must start with /", path)
+		}
+		paths = append(paths, path)
+	}
+	return fmt.Sprintf("%s EXPAND %s %s;",
+		strings.TrimSpace(base),
+		strings.ToUpper(string(mode)),
+		strings.Join(paths, ","),
+	), nil
 }

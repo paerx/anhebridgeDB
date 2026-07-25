@@ -270,6 +270,131 @@ func TestSuperValueExpandRawAndReadOnlyProtection(t *testing.T) {
 	}
 }
 
+func TestSuperValueSelectiveExpansion(t *testing.T) {
+	engine, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	for key, value := range map[string]string{
+		"ref:checkin":  `{"type":"checkin"}`,
+		"ref:owner":    `{"type":"owner"}`,
+		"ref:rewards":  `{"type":"rewards"}`,
+		"ref:campaign": `{"type":"campaign"}`,
+		"ref:chest:1":  `{"type":"chest"}`,
+	} {
+		if _, err := engine.Set(key, json.RawMessage(value)); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	if _, err := engine.Set("vape:1", json.RawMessage(`{
+		"checkin":"*ref:checkin",
+		"owner":"*ref:owner",
+		"rewards":"*ref:rewards",
+		"campaign":"*ref:campaign",
+		"chests":["*ref:chest:1","*vape:1"]
+	}`)); err != nil {
+		t.Fatalf("seed vape: %v", err)
+	}
+
+	record, err := engine.GetWithOptions("vape:1", ReadOptions{
+		ExpandMode:  SuperValueExpandOnly,
+		ExpandPaths: []string{"/checkin", "/owner", "/rewards"},
+	})
+	if err != nil {
+		t.Fatalf("selectively expand vape: %v", err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatalf("decode selectively expanded vape: %v", err)
+	}
+	for _, field := range []string{"checkin", "owner", "rewards"} {
+		expanded, ok := value[field].(map[string]any)
+		if !ok || expanded["found"] != true {
+			t.Fatalf("expected %s to be expanded, got %#v", field, value[field])
+		}
+	}
+	if value["campaign"] != "*ref:campaign" {
+		t.Fatalf("expected campaign ref to be preserved, got %#v", value["campaign"])
+	}
+	chests, ok := value["chests"].([]any)
+	if !ok || len(chests) != 2 || chests[0] != "*ref:chest:1" || chests[1] != "*vape:1" {
+		t.Fatalf("expected chests refs to be preserved, got %#v", value["chests"])
+	}
+
+	record, err = engine.GetWithOptions("vape:1", ReadOptions{
+		ExpandMode:  SuperValueExpandExcept,
+		ExpandPaths: []string{"/chests", "/campaign"},
+	})
+	if err != nil {
+		t.Fatalf("expand vape except selected paths: %v", err)
+	}
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatalf("decode except result: %v", err)
+	}
+	if _, ok := value["checkin"].(map[string]any); !ok {
+		t.Fatalf("expected checkin to be expanded, got %#v", value["checkin"])
+	}
+	if value["campaign"] != "*ref:campaign" {
+		t.Fatalf("expected campaign ref to be preserved, got %#v", value["campaign"])
+	}
+}
+
+func TestSuperValueSelectiveExpansionArrayPath(t *testing.T) {
+	engine, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	if _, err := engine.Set("chest:1", json.RawMessage(`{"stage":1}`)); err != nil {
+		t.Fatalf("seed chest 1: %v", err)
+	}
+	if _, err := engine.Set("chest:2", json.RawMessage(`{"stage":2}`)); err != nil {
+		t.Fatalf("seed chest 2: %v", err)
+	}
+	if _, err := engine.Set("vape:2", json.RawMessage(`{"chests":["*chest:1","*chest:2"]}`)); err != nil {
+		t.Fatalf("seed vape: %v", err)
+	}
+
+	record, err := engine.GetWithOptions("vape:2", ReadOptions{
+		ExpandMode:  SuperValueExpandOnly,
+		ExpandPaths: []string{"/chests/0"},
+	})
+	if err != nil {
+		t.Fatalf("expand first chest: %v", err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatalf("decode first chest result: %v", err)
+	}
+	chests := value["chests"].([]any)
+	if _, ok := chests[0].(map[string]any); !ok {
+		t.Fatalf("expected first chest expanded, got %#v", chests[0])
+	}
+	if chests[1] != "*chest:2" {
+		t.Fatalf("expected second chest preserved, got %#v", chests[1])
+	}
+
+	record, err = engine.GetWithOptions("vape:2", ReadOptions{
+		ExpandMode:  SuperValueExpandOnly,
+		ExpandPaths: []string{"/chests/*"},
+	})
+	if err != nil {
+		t.Fatalf("expand all chests with wildcard: %v", err)
+	}
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatalf("decode wildcard result: %v", err)
+	}
+	chests = value["chests"].([]any)
+	for index, chest := range chests {
+		if _, ok := chest.(map[string]any); !ok {
+			t.Fatalf("expected chest %d expanded, got %#v", index, chest)
+		}
+	}
+}
+
 func TestSuperValueCycleDetection(t *testing.T) {
 	dir := t.TempDir()
 	engine, err := Open(dir)

@@ -941,6 +941,18 @@ func (e *Engine) Get(key string) (Record, error) {
 	return e.resolveRecordForRead(key, readContext{mode: readModeLatest})
 }
 
+func (e *Engine) GetWithOptions(key string, opts ReadOptions) (Record, error) {
+	start := time.Now()
+	defer observe(e.metrics.get, start)
+	ctx, err := prepareReadContext(readContext{mode: readModeLatest}, opts)
+	if err != nil {
+		return Record{}, err
+	}
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, ctx)
+}
+
 func (e *Engine) GetRaw(key string) (Record, error) {
 	start := time.Now()
 	defer observe(e.metrics.get, start)
@@ -959,6 +971,36 @@ func (e *Engine) BatchGetRaw(keys []string) []BatchGetItem {
 	start := time.Now()
 	defer observe(e.metrics.get, start)
 	return e.batchGetWithOptions(keys, true)
+}
+
+func (e *Engine) BatchGetWithReadOptions(keys []string, opts ReadOptions) ([]BatchGetItem, error) {
+	start := time.Now()
+	defer observe(e.metrics.get, start)
+	ctx, err := prepareReadContext(readContext{mode: readModeLatest}, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	unlock := e.rlockKeys(keys)
+	defer unlock()
+
+	items := make([]BatchGetItem, 0, len(keys))
+	for _, key := range keys {
+		record, err := e.resolveRecordForRead(key, ctx)
+		if err != nil {
+			items = append(items, BatchGetItem{Key: key, Found: false})
+			continue
+		}
+		updatedAt := record.UpdatedAt
+		items = append(items, BatchGetItem{
+			Key:       key,
+			Found:     true,
+			Value:     clone(record.Value),
+			Version:   record.Version,
+			UpdatedAt: &updatedAt,
+		})
+	}
+	return items, nil
 }
 
 func (e *Engine) batchGetWithOptions(keys []string, raw bool) []BatchGetItem {
@@ -992,6 +1034,18 @@ func (e *Engine) GetAt(key string, at time.Time) (Record, error) {
 	return e.resolveRecordForRead(key, readContext{mode: readModeAt, at: at.UTC()})
 }
 
+func (e *Engine) GetAtWithOptions(key string, at time.Time, opts ReadOptions) (Record, error) {
+	start := time.Now()
+	defer observe(e.metrics.getAt, start)
+	ctx, err := prepareReadContext(readContext{mode: readModeAt, at: at.UTC()}, opts)
+	if err != nil {
+		return Record{}, err
+	}
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, ctx)
+}
+
 func (e *Engine) GetAtRaw(key string, at time.Time) (Record, error) {
 	start := time.Now()
 	defer observe(e.metrics.getAt, start)
@@ -1004,6 +1058,16 @@ func (e *Engine) GetLast(key string, steps int) (Record, error) {
 	unlock := e.rlockKey(key)
 	defer unlock()
 	return e.resolveRecordForRead(key, readContext{mode: readModeLast, steps: steps})
+}
+
+func (e *Engine) GetLastWithOptions(key string, steps int, opts ReadOptions) (Record, error) {
+	ctx, err := prepareReadContext(readContext{mode: readModeLast, steps: steps}, opts)
+	if err != nil {
+		return Record{}, err
+	}
+	unlock := e.rlockKey(key)
+	defer unlock()
+	return e.resolveRecordForRead(key, ctx)
 }
 
 func (e *Engine) GetLastRaw(key string, steps int) (Record, error) {

@@ -290,6 +290,60 @@ func TestExecuteGetRawAndSuperValueExpansion(t *testing.T) {
 	}
 }
 
+func TestExecuteSelectiveSuperValueExpansion(t *testing.T) {
+	engine, err := db.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open engine: %v", err)
+	}
+	defer engine.Close()
+
+	exec := New(engine)
+	if _, err := exec.Execute(`
+		SET checkin:1 [{"day":1}];
+		SET chest:1 {"stage":1};
+		SET chest:2 {"stage":2};
+		SET vape:1 {"checkin":"*checkin:1","chests":["*chest:1","*chest:2"]};
+	`); err != nil {
+		t.Fatalf("seed selective super values: %v", err)
+	}
+
+	results, err := exec.Execute(`GET vape:1 EXPAND ONLY /checkin;`)
+	if err != nil {
+		t.Fatalf("get expand only: %v", err)
+	}
+	record := results[0].(db.Record)
+	var value map[string]any
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatalf("decode expand only result: %v", err)
+	}
+	if _, ok := value["checkin"].(map[string]any); !ok {
+		t.Fatalf("expected checkin expanded, got %#v", value["checkin"])
+	}
+	chests := value["chests"].([]any)
+	if chests[0] != "*chest:1" || chests[1] != "*chest:2" {
+		t.Fatalf("expected chest refs preserved, got %#v", chests)
+	}
+
+	batchResults, err := exec.Execute(`AGET vape:1 EXPAND ONLY /chests/0;`)
+	if err != nil {
+		t.Fatalf("aget expand only: %v", err)
+	}
+	items := batchResults[0].([]db.BatchGetItem)
+	if len(items) != 1 || !items[0].Found {
+		t.Fatalf("unexpected AGET result: %#v", items)
+	}
+	if err := json.Unmarshal(items[0].Value, &value); err != nil {
+		t.Fatalf("decode AGET result: %v", err)
+	}
+	chests = value["chests"].([]any)
+	if _, ok := chests[0].(map[string]any); !ok {
+		t.Fatalf("expected first chest expanded, got %#v", chests[0])
+	}
+	if chests[1] != "*chest:2" {
+		t.Fatalf("expected second chest preserved, got %#v", chests[1])
+	}
+}
+
 func TestExecuteTxnAutoAbortAndReadableInTxn(t *testing.T) {
 	engine, err := db.Open(t.TempDir())
 	if err != nil {
