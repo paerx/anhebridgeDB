@@ -17,14 +17,14 @@ WORKDIR /app
 
 COPY --from=builder /out/anhe-server /usr/local/bin/anhe-server
 COPY --from=builder /out/anhe-restore /usr/local/bin/anhe-restore
-COPY config/config.json /app/config/config.json
+COPY config/config.example.json /app/config/config.json
 
 RUN mkdir -p /app/data /app/config && chown -R anhe:anhe /app
 
 USER anhe
 
 EXPOSE 8080
-VOLUME ["/app/data", "/app/config"]
+VOLUME ["/app/data"]
 
 ENTRYPOINT ["/usr/local/bin/anhe-server"]
 CMD ["-addr", ":8080", "-data", "/app/data", "-config", "/app/config/config.json", "-scheduler-interval", "1s"]

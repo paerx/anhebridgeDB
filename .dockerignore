@@ -4,6 +4,7 @@
 .gocache
 .DS_Store
 b.log
+/config/config.json
 data/log
 data/snapshot
 sdkdemo

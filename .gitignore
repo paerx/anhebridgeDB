@@ -2,6 +2,9 @@
 .gocache/
 bin/
 
+# Local configuration contains authentication and backup credentials.
+/config/config.json
+
 # Local runtime data
 data/**/*.anhe
 

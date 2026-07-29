@@ -81,6 +81,14 @@ AnheBridgeDB v1 covers the current MVP path described in `docs/`:
 
 ## Run
 
+Create a local configuration file before starting. The real file is ignored by
+Git and Docker because it can contain authentication, R2, and Lark credentials:
+
+```bash
+cp config/config.example.json config/config.json
+chmod 600 config/config.json
+```
+
 ```bash
 go run ./cmd/server -addr :8080 -data ./data -scheduler-interval 1s
 ```

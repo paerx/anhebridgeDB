@@ -1,0 +1,90 @@
+{
+  "auth": {
+    "enabled": false,
+    "token_ttl_minutes": 1440,
+    "users": [
+      {
+        "username": "admin",
+        "password": "change-me"
+      }
+    ]
+  },
+  "storage": {
+    "mode": "normal",
+    "durability": "safe",
+    "replica_wal": {
+      "addr": "",
+      "timeout_ms": 1500
+    },
+    "strict_recovery": false,
+    "segment": {
+      "max_bytes": 67108864,
+      "max_records": 200000
+    }
+  },
+  "performance": {
+    "event_cache_max_items": 50000,
+    "event_cache_max_bytes": 134217728,
+    "key_index_compact_ops": 10000,
+    "scheduler_workers": 4,
+    "index_flush_mode": "async",
+    "ingress_max_inflight": 256,
+    "ingress_max_queue": 1024,
+    "ingress_queue_timeout_ms": 2000,
+    "metrics_sample_interval_seconds": 10,
+    "snapshot_batch_size": 10000,
+    "timeline_default_limit": 1000,
+    "super_value_max_depth": 5,
+    "super_value_max_fanout": 200,
+    "super_value_max_nodes": 1000
+  },
+  "transport": {
+    "ws_only_mode": false
+  },
+  "backup": {
+    "enabled": false,
+    "mode": "incremental",
+    "run_on_start": true,
+    "interval_seconds": 7200,
+    "timeout_seconds": 7200,
+    "spool_dir": "./data/backups",
+    "keep_local": true,
+    "local_retention_count": 3,
+    "bootstrap_restore": {
+      "enabled": false,
+      "manifest": "latest",
+      "workers": 4,
+      "timeout_seconds": 7200
+    },
+    "upload": {
+      "enabled": false,
+      "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+      "bucket": "<bucket-name>",
+      "prefix": "anhebridgedb",
+      "access_key_id": "<r2-access-key-id>",
+      "secret_access_key": "<r2-secret-access-key>",
+      "max_object_bytes": 5368709120,
+      "retry_count": 3,
+      "retry_backoff_ms": 1000
+    },
+    "lark": {
+      "enabled": false,
+      "webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/<hook-id>",
+      "secret": "",
+      "notify_success": true
+    },
+    "monitor": {
+      "enabled": true,
+      "interval_seconds": 60,
+      "verify_interval_seconds": 86400,
+      "consecutive_breaches": 3,
+      "alert_cooldown_seconds": 1800,
+      "heap_alloc_max_bytes": 0,
+      "pending_tasks_max": 0,
+      "overdue_tasks_max": 0,
+      "write_queue_max": 0,
+      "append_p95_max_ms": 0,
+      "get_p95_max_ms": 0
+    }
+  }
+}
