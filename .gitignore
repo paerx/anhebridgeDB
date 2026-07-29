@@ -4,6 +4,8 @@ bin/
 
 # Local configuration contains authentication and backup credentials.
 /config/config.json
+/anhebridgedb-full*.tar.gz
+/anhebridgedb-full*.tar.gz.sha256
 
 # Local runtime data
 data/**/*.anhe

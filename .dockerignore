@@ -5,6 +5,8 @@
 .DS_Store
 b.log
 /config/config.json
+anhebridgedb-full*.tar.gz
+anhebridgedb-full*.tar.gz.sha256
 data/log
 data/snapshot
 sdkdemo
