@@ -166,6 +166,32 @@ func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 	if string(record.Value) != `{"version":2}` {
 		t.Fatalf("restored value = %s", record.Value)
 	}
+
+	volumeTarget := t.TempDir()
+	cfg.Backup.BootstrapRestore.Enabled = true
+	cfg.Backup.BootstrapRestore.Workers = 3
+	volumeReport, attempted, err := BootstrapRestoreIfEmpty(context.Background(), cfg, volumeTarget)
+	if err != nil {
+		t.Fatalf("bootstrap latest into existing empty volume: %v", err)
+	}
+	if !attempted {
+		t.Fatal("expected bootstrap restore attempt")
+	}
+	if volumeReport.LastEventID != 2 {
+		t.Fatalf("unexpected volume restore report: %+v", volumeReport)
+	}
+	volumeEngine, err := db.Open(volumeTarget)
+	if err != nil {
+		t.Fatalf("open volume-restored engine: %v", err)
+	}
+	defer volumeEngine.Close()
+	volumeRecord, err := volumeEngine.Get("restore:key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(volumeRecord.Value) != `{"version":2}` {
+		t.Fatalf("volume restored value = %s", volumeRecord.Value)
+	}
 }
 
 func TestRestoreRejectsNonEmptyTargetWithoutForce(t *testing.T) {
@@ -175,6 +201,67 @@ func TestRestoreRejectsNonEmptyTargetWithoutForce(t *testing.T) {
 	}
 	if err := ensureRestoreTarget(target, false); err == nil {
 		t.Fatal("expected non-empty target rejection")
+	}
+}
+
+func TestBootstrapTargetEmptiness(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	empty, err := bootstrapTargetIsEmpty(missing)
+	if err != nil || !empty {
+		t.Fatalf("missing target: empty=%t err=%v", empty, err)
+	}
+
+	target := t.TempDir()
+	empty, err = bootstrapTargetIsEmpty(target)
+	if err != nil || !empty {
+		t.Fatalf("empty target: empty=%t err=%v", empty, err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "existing"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty, err = bootstrapTargetIsEmpty(target)
+	if err != nil || empty {
+		t.Fatalf("non-empty target: empty=%t err=%v", empty, err)
+	}
+}
+
+func TestBootstrapRejectsIncompleteActivation(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, restoreActivationMarker), []byte("stage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bootstrapTargetIsEmpty(target); err == nil {
+		t.Fatal("expected incomplete activation error")
+	}
+}
+
+func TestActivateRestoreInsideExistingEmptyDirectory(t *testing.T) {
+	target := t.TempDir()
+	stage, inPlace, err := createRestoreStage(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inPlace {
+		t.Fatal("expected in-place staging for existing empty directory")
+	}
+	if err := os.MkdirAll(filepath.Join(stage, "log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "log", "segment_000001.anhe"), []byte("event"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activateRestoredDirectory(stage, target, false, inPlace); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "log", "segment_000001.anhe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "event" {
+		t.Fatalf("restored data = %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(target, restoreActivationMarker)); !os.IsNotExist(err) {
+		t.Fatalf("activation marker remains: %v", err)
 	}
 }
 

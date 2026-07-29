@@ -267,6 +267,12 @@ Automatic backup is opt-in and disabled by default. When enabled, the server rot
     "spool_dir": "./data/backups",
     "keep_local": true,
     "local_retention_count": 3,
+    "bootstrap_restore": {
+      "enabled": false,
+      "manifest": "latest",
+      "workers": 4,
+      "timeout_seconds": 7200
+    },
     "upload": {
       "enabled": true,
       "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
@@ -341,18 +347,22 @@ go run ./cmd/restore \
 
 The restore command:
 
-- downloads into a sibling staging directory
+- downloads into a staging directory on the target filesystem
 - rejects absolute or parent-traversal paths
 - verifies every object size and SHA-256
 - rebuilds position and latest-key indexes
 - opens the staged database with strict HMAC recovery by default
-- atomically renames the staged directory into place only after validation
+- activates the staged directory only after validation
 
 The target must be empty unless `-force` is passed. With `-force`, the existing directory is preserved as `<data>.pre-restore-<UTC>` rather than deleted. Set the same `ANHEBRIDGE_HMAC_KEY` used by the source database before running verified restore.
 
 The Docker image also includes `/usr/local/bin/anhe-restore`. Run it from a one-off container with the database service stopped and the data/config volumes mounted; the normal image entrypoint remains `anhe-server`.
 
 The archive intentionally rebuilds volatile indexes during import rather than copying indexes while they are changing. An R2 or Lark configuration error does not terminate the database; local backup remains active and the failure is recorded in logs and metrics.
+
+For a new instance with an empty data volume, set `backup.bootstrap_restore.enabled` to `true`. Before opening the database or listening for HTTP/WS traffic, the server restores the configured manifest (`latest` by default), verifies HMAC and SHA-256 integrity, rebuilds indexes, and then starts normally. A restore failure aborts startup so the instance cannot accidentally accept writes into an empty database. If the data directory contains any existing entry, bootstrap restore is skipped and never overwrites local data.
+
+Bootstrap restore is cold-start recovery, not bidirectional replication. Do not run multiple writable instances against the same R2 prefix: independently produced `latest.json` pointers can overwrite each other and create divergent histories. New instances must use the same `ANHEBRIDGE_HMAC_KEY`, R2 endpoint, bucket, prefix, Access Key ID, and Secret Access Key as the source instance.
 
 To enable auth for dashboard and CLI, set:
 

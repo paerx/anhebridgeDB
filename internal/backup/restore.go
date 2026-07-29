@@ -104,11 +104,7 @@ func RestoreFromR2(ctx context.Context, cfg config.Config, options RestoreOption
 	if err := ensureRestoreTarget(target, options.Force); err != nil {
 		return RestoreReport{}, err
 	}
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return RestoreReport{}, err
-	}
-	stage, err := os.MkdirTemp(parent, "."+filepath.Base(target)+".restore-")
+	stage, inPlace, err := createRestoreStage(target)
 	if err != nil {
 		return RestoreReport{}, err
 	}
@@ -144,7 +140,7 @@ func RestoreFromR2(ctx context.Context, cfg config.Config, options RestoreOption
 		}
 	}
 
-	previous, err := activateRestoredDirectory(stage, target, options.Force)
+	previous, err := activateRestoredDirectory(stage, target, options.Force, inPlace)
 	if err != nil {
 		return RestoreReport{}, err
 	}
@@ -359,7 +355,27 @@ func ensureRestoreTarget(target string, force bool) error {
 	return nil
 }
 
-func activateRestoredDirectory(stage, target string, force bool) (string, error) {
+func createRestoreStage(target string) (string, bool, error) {
+	entries, err := os.ReadDir(target)
+	if err == nil && len(entries) == 0 {
+		stage, err := os.MkdirTemp(target, ".anhe-restore-")
+		return stage, true, err
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", false, err
+	}
+	stage, err := os.MkdirTemp(parent, "."+filepath.Base(target)+".restore-")
+	return stage, false, err
+}
+
+func activateRestoredDirectory(stage, target string, force, inPlace bool) (string, error) {
+	if inPlace {
+		return "", activateRestoreInPlace(stage, target)
+	}
 	var previous string
 	if _, err := os.Stat(target); err == nil {
 		entries, readErr := os.ReadDir(target)
@@ -389,6 +405,69 @@ func activateRestoredDirectory(stage, target string, force bool) (string, error)
 		return "", err
 	}
 	return previous, nil
+}
+
+func activateRestoreInPlace(stage, target string) error {
+	stageBase := filepath.Base(stage)
+	targetEntries, err := os.ReadDir(target)
+	if err != nil {
+		return err
+	}
+	if len(targetEntries) != 1 || targetEntries[0].Name() != stageBase {
+		return fmt.Errorf("restore target changed while restore was running")
+	}
+	marker := filepath.Join(target, restoreActivationMarker)
+	if err := os.WriteFile(marker, []byte(stageBase+"\n"), 0o600); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		_ = os.Remove(marker)
+		return err
+	}
+	moved := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		source := filepath.Join(stage, entry.Name())
+		destination := filepath.Join(target, entry.Name())
+		if err := os.Rename(source, destination); err != nil {
+			rollbackErr := rollbackRestoreMoves(stage, target, moved)
+			if rollbackErr == nil {
+				_ = os.Remove(marker)
+			}
+			if rollbackErr != nil {
+				return fmt.Errorf("activate restored data: %w; rollback failed: %v", err, rollbackErr)
+			}
+			return fmt.Errorf("activate restored data: %w", err)
+		}
+		moved = append(moved, entry.Name())
+	}
+	if err := os.Remove(stage); err != nil {
+		return fmt.Errorf("remove restore staging directory: %w", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		return fmt.Errorf("remove restore activation marker: %w", err)
+	}
+	return syncDirectory(target)
+}
+
+func rollbackRestoreMoves(stage, target string, moved []string) error {
+	for i := len(moved) - 1; i >= 0; i-- {
+		name := moved[i]
+		if err := os.Rename(filepath.Join(target, name), filepath.Join(stage, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncDirectory(directory string) error {
+	file, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
 }
 
 func maxEventID(refs map[uint64]storage.EventRef) uint64 {

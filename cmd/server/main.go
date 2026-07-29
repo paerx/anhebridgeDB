@@ -31,6 +31,29 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	if cfg.Backup.BootstrapRestore.Enabled {
+		restoreCtx, cancelRestore := context.WithTimeout(
+			context.Background(),
+			time.Duration(cfg.Backup.BootstrapRestore.TimeoutSeconds)*time.Second,
+		)
+		report, attempted, restoreErr := backupsvc.BootstrapRestoreIfEmpty(restoreCtx, cfg, *dataDir)
+		cancelRestore()
+		if restoreErr != nil {
+			log.Fatalf("bootstrap restore: %v", restoreErr)
+		}
+		if attempted {
+			log.Printf(
+				"bootstrap restore completed: backup_id=%s files=%d bytes=%d last_event_id=%d",
+				report.BackupID,
+				report.RestoredFiles,
+				report.RestoredBytes,
+				report.LastEventID,
+			)
+		} else {
+			log.Printf("bootstrap restore skipped: data directory is not empty")
+		}
+	}
+
 	engine, err := db.OpenWithStorageConfig(*dataDir, cfg.Storage, cfg.Performance)
 	if err != nil {
 		log.Fatalf("open db: %v", err)

@@ -66,17 +66,25 @@ type TransportConfig struct {
 }
 
 type BackupConfig struct {
-	Enabled             bool                `json:"enabled"`
-	Mode                string              `json:"mode"`
-	RunOnStart          bool                `json:"run_on_start"`
-	IntervalSeconds     int                 `json:"interval_seconds"`
-	TimeoutSeconds      int                 `json:"timeout_seconds"`
-	SpoolDir            string              `json:"spool_dir"`
-	KeepLocal           bool                `json:"keep_local"`
-	LocalRetentionCount int                 `json:"local_retention_count"`
-	Upload              BackupUploadConfig  `json:"upload"`
-	Lark                BackupLarkConfig    `json:"lark"`
-	Monitor             BackupMonitorConfig `json:"monitor"`
+	Enabled             bool                   `json:"enabled"`
+	Mode                string                 `json:"mode"`
+	RunOnStart          bool                   `json:"run_on_start"`
+	IntervalSeconds     int                    `json:"interval_seconds"`
+	TimeoutSeconds      int                    `json:"timeout_seconds"`
+	SpoolDir            string                 `json:"spool_dir"`
+	KeepLocal           bool                   `json:"keep_local"`
+	LocalRetentionCount int                    `json:"local_retention_count"`
+	BootstrapRestore    BootstrapRestoreConfig `json:"bootstrap_restore"`
+	Upload              BackupUploadConfig     `json:"upload"`
+	Lark                BackupLarkConfig       `json:"lark"`
+	Monitor             BackupMonitorConfig    `json:"monitor"`
+}
+
+type BootstrapRestoreConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Manifest       string `json:"manifest"`
+	Workers        int    `json:"workers"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 type BackupUploadConfig struct {
@@ -159,6 +167,11 @@ func Default() Config {
 			SpoolDir:            "./data/backups",
 			KeepLocal:           true,
 			LocalRetentionCount: 3,
+			BootstrapRestore: BootstrapRestoreConfig{
+				Manifest:       "latest",
+				Workers:        4,
+				TimeoutSeconds: 2 * 60 * 60,
+			},
 			Upload: BackupUploadConfig{
 				Enabled:        false,
 				Prefix:         "anhebridgedb",
@@ -281,6 +294,18 @@ func normalizeBackupConfig(cfg *BackupConfig) {
 	}
 	if cfg.LocalRetentionCount < 0 {
 		cfg.LocalRetentionCount = 0
+	}
+	if cfg.BootstrapRestore.Manifest == "" {
+		cfg.BootstrapRestore.Manifest = defaults.BootstrapRestore.Manifest
+	}
+	if cfg.BootstrapRestore.Workers <= 0 {
+		cfg.BootstrapRestore.Workers = defaults.BootstrapRestore.Workers
+	}
+	if cfg.BootstrapRestore.Workers > 32 {
+		cfg.BootstrapRestore.Workers = 32
+	}
+	if cfg.BootstrapRestore.TimeoutSeconds <= 0 {
+		cfg.BootstrapRestore.TimeoutSeconds = defaults.BootstrapRestore.TimeoutSeconds
 	}
 	if cfg.Upload.Prefix == "" {
 		cfg.Upload.Prefix = defaults.Upload.Prefix
