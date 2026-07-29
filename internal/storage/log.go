@@ -72,6 +72,13 @@ type LogCheckpoint struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type BackupCut struct {
+	LastEventID uint64    `json:"last_event_id"`
+	LastSegment int       `json:"last_segment"`
+	LastAuthTag string    `json:"last_auth_tag,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type ArchiveSegmentEntry struct {
 	Segment       string    `json:"segment"`
 	FirstEventID  uint64    `json:"first_event_id,omitempty"`
@@ -395,6 +402,52 @@ func (l *EventLog) AppendBatch(events []Event) ([]Event, error) {
 	return persisted, nil
 }
 
+// RotateForBackup closes the current write segment at a durable event boundary.
+// The returned cut only references immutable segments, so backup compression and
+// upload can continue without holding the append lock.
+func (l *EventLog) RotateForBackup() (BackupCut, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file == nil {
+		return BackupCut{}, errors.New("event log is closed")
+	}
+	if err := l.file.Sync(); err != nil {
+		return BackupCut{}, err
+	}
+	if l.walFile != nil {
+		if err := l.walFile.Sync(); err != nil {
+			return BackupCut{}, err
+		}
+	}
+
+	lastSegment := l.currentSegment
+	if l.currentRecordCount == 0 {
+		lastSegment--
+	} else {
+		l.currentSegment++
+		l.currentRecordCount = 0
+		l.currentSizeBytes = 0
+		if err := l.openSegment(l.currentSegment); err != nil {
+			return BackupCut{}, err
+		}
+	}
+	if err := l.persistCheckpoint(); err != nil {
+		return BackupCut{}, err
+	}
+
+	lastEventID := uint64(0)
+	if l.nextID > 0 {
+		lastEventID = l.nextID - 1
+	}
+	return BackupCut{
+		LastEventID: lastEventID,
+		LastSegment: lastSegment,
+		LastAuthTag: l.lastAuthTag,
+		CreatedAt:   time.Now().UTC(),
+	}, nil
+}
+
 func (l *EventLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -642,6 +695,8 @@ func ArchiveColdSegments(logDir string, keepSegment string, lastSafeEventID uint
 }
 
 func CompactArchivedSegments(dataDir string, currentSegment string, lastSafeEventID uint64) (int, error) {
+	const maxCompactedSegmentBytes int64 = 4 * 1024 * 1024 * 1024
+
 	logDir := filepath.Join(dataDir, "log")
 	archiveDir := ArchiveDir(logDir)
 	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
@@ -651,9 +706,23 @@ func CompactArchivedSegments(dataDir string, currentSegment string, lastSafeEven
 	if err != nil {
 		return 0, err
 	}
+	archiveManifest, err := LoadArchiveManifest(logDir)
+	if err != nil {
+		return 0, err
+	}
+	compactedSegments := make(map[string]struct{}, len(archiveManifest.Segments))
+	for _, entry := range archiveManifest.Segments {
+		if entry.Compacted {
+			compactedSegments[entry.Segment] = struct{}{}
+		}
+	}
 	candidates := make([]SegmentManifest, 0)
+	var candidateBytes int64
 	for _, manifest := range manifests {
 		if manifest.Segment == "" || manifest.Segment == currentSegment {
+			continue
+		}
+		if _, compacted := compactedSegments[manifest.Segment]; compacted {
 			continue
 		}
 		path := ArchiveSegmentPath(logDir, manifest.Segment)
@@ -663,7 +732,11 @@ func CompactArchivedSegments(dataDir string, currentSegment string, lastSafeEven
 		if manifest.LastEventID == 0 || manifest.LastEventID > lastSafeEventID {
 			continue
 		}
+		if candidateBytes > 0 && candidateBytes+manifest.SizeBytes > maxCompactedSegmentBytes {
+			continue
+		}
 		candidates = append(candidates, manifest)
+		candidateBytes += manifest.SizeBytes
 	}
 	if len(candidates) < 2 {
 		return 0, nil
@@ -673,10 +746,6 @@ func CompactArchivedSegments(dataDir string, currentSegment string, lastSafeEven
 	})
 
 	refs, err := LoadPositionIndex(dataDir)
-	if err != nil {
-		return 0, err
-	}
-	archiveManifest, err := LoadArchiveManifest(logDir)
 	if err != nil {
 		return 0, err
 	}
@@ -789,6 +858,14 @@ func ComputeRollingAuth(current, next string) string {
 	_, _ = mac.Write([]byte(current))
 	_, _ = mac.Write([]byte{'\n'})
 	_, _ = mac.Write([]byte(next))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func ComputeDataAuthTag(label string, data []byte) string {
+	mac := hmac.New(sha256.New, hmacSecret())
+	_, _ = mac.Write([]byte(label))
+	_, _ = mac.Write([]byte{'\n'})
+	_, _ = mac.Write(data)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 

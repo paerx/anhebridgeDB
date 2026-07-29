@@ -164,12 +164,18 @@ func collectAllFiles(dataDir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(dataDir, path)
 		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			if rel == "backups" || strings.HasPrefix(filepath.ToSlash(rel), "backups/.views") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(rel, ".partial") {
+			return nil
 		}
 		paths = append(paths, rel)
 		return nil

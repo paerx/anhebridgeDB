@@ -138,6 +138,8 @@ const keyLockCount = 256
 type Engine struct {
 	metaMu         sync.RWMutex
 	persistMu      sync.Mutex
+	maintenanceMu  sync.RWMutex
+	backupMu       sync.Mutex
 	dataDir        string
 	log            *storage.EventLog
 	keyLocks       [keyLockCount]sync.RWMutex
@@ -466,6 +468,9 @@ func (e *Engine) VerifyStorage() (StorageVerifyReport, error) {
 }
 
 func (e *Engine) CompactStorage() (CompactReport, error) {
+	e.maintenanceMu.Lock()
+	defer e.maintenanceMu.Unlock()
+
 	e.metaMu.Lock()
 	defer e.metaMu.Unlock()
 

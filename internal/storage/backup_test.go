@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,6 +59,26 @@ func TestExportImportFullBackup(t *testing.T) {
 	entry, ok := index["user:1"]
 	if !ok || entry.LatestEvent != 1 {
 		t.Fatalf("unexpected latest index entry: %+v", entry)
+	}
+}
+
+func TestExportFullBackupExcludesBackupSpool(t *testing.T) {
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "backups", ".views"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "backups", "old.tar.gz"), []byte("recursive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "keep.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := collectAllFiles(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != "keep.txt" {
+		t.Fatalf("unexpected exported paths: %v", paths)
 	}
 }
 

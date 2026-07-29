@@ -250,6 +250,117 @@ Segment rolling is configurable in [config.json](/Users/pangaichen/Desktop/AnheB
 
 Both thresholds can be enabled together. A segment rolls when either limit is exceeded.
 
+### Automatic Backup And Health Inspection
+
+Automatic backup is opt-in and disabled by default. When enabled, the server rotates the active segment at a durable event boundary and runs backup work in background goroutines. Normal GET/SET/ASET processing does not wait for R2 upload, Lark, or health inspection.
+
+`incremental` is the recommended mode. It runs every two hours, uploads each immutable event segment only once using a content-addressed R2 object key, saves mutable rule/task/checkpoint files for the current backup, then atomically advances `incremental/latest.json`. A failed run never replaces the last valid restore pointer.
+
+```json
+{
+  "backup": {
+    "enabled": true,
+    "mode": "incremental",
+    "run_on_start": true,
+    "interval_seconds": 7200,
+    "timeout_seconds": 7200,
+    "spool_dir": "./data/backups",
+    "keep_local": true,
+    "local_retention_count": 3,
+    "upload": {
+      "enabled": true,
+      "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+      "bucket": "anhe-backups",
+      "prefix": "production",
+      "access_key_env": "ANHEBRIDGE_R2_ACCESS_KEY_ID",
+      "secret_access_key_env": "ANHEBRIDGE_R2_SECRET_ACCESS_KEY",
+      "max_object_bytes": 5368709120,
+      "retry_count": 3,
+      "retry_backoff_ms": 1000
+    },
+    "lark": {
+      "enabled": true,
+      "webhook_env": "ANHEBRIDGE_LARK_WEBHOOK",
+      "secret_env": "ANHEBRIDGE_LARK_SECRET",
+      "notify_success": true
+    },
+    "monitor": {
+      "enabled": true,
+      "interval_seconds": 60,
+      "verify_interval_seconds": 86400,
+      "consecutive_breaches": 3,
+      "alert_cooldown_seconds": 1800,
+      "heap_alloc_max_bytes": 8589934592,
+      "pending_tasks_max": 100000,
+      "overdue_tasks_max": 1000,
+      "write_queue_max": 800,
+      "append_p95_max_ms": 100,
+      "get_p95_max_ms": 50
+    }
+  }
+}
+```
+
+Secrets are read from environment variables and are never persisted in the backup:
+
+```bash
+export ANHEBRIDGE_R2_ACCESS_KEY_ID='...'
+export ANHEBRIDGE_R2_SECRET_ACCESS_KEY='...'
+export ANHEBRIDGE_LARK_WEBHOOK='https://open.feishu.cn/open-apis/bot/v2/hook/...'
+export ANHEBRIDGE_LARK_SECRET='...'
+```
+
+Threshold value `0` disables that individual alert. Alerts require `consecutive_breaches` consecutive samples and use `alert_cooldown_seconds` to prevent notification storms. Full HMAC-chain verification runs separately at `verify_interval_seconds`; set it to `0` to disable deep verification.
+
+Incremental R2 layout:
+
+- `incremental/objects/<sha-prefix>/<sha256>.anhe`: immutable segment objects shared by backup generations
+- `incremental/backups/<backup-id>/files/...`: mutable metadata captured for one generation
+- `incremental/manifests/<backup-id>.json`: HMAC-signed restore manifest with size and SHA-256 for every file
+- `incremental/latest.json`: HMAC-signed pointer updated only after all files and the manifest are durable
+
+The local `incremental-state.json` avoids hashing stable segments on every run. If it is lost, content-addressed R2 HEAD checks prevent already uploaded segment bodies from being uploaded again.
+
+Archive compaction output is capped at 4 GiB and already compacted archives are not merged again, keeping each incremental object below the default 5 GiB single-upload ceiling.
+
+If `mode` is `full`, or R2 upload is disabled, the existing local `.tar.gz` full-backup path remains available.
+
+### Restore From R2
+
+Stop the database process before restoring. Restore defaults to the latest completed incremental backup:
+
+```bash
+go run ./cmd/restore \
+  -config ./config/config.json \
+  -data ./data-restored \
+  -manifest latest \
+  -workers 4
+```
+
+Restore a specific generation by using the manifest object key printed in backup logs:
+
+```bash
+go run ./cmd/restore \
+  -config ./config/config.json \
+  -data ./data-restored \
+  -manifest 'production/incremental/manifests/20260729T120000.000000000Z-e12345.json'
+```
+
+The restore command:
+
+- downloads into a sibling staging directory
+- rejects absolute or parent-traversal paths
+- verifies every object size and SHA-256
+- rebuilds position and latest-key indexes
+- opens the staged database with strict HMAC recovery by default
+- atomically renames the staged directory into place only after validation
+
+The target must be empty unless `-force` is passed. With `-force`, the existing directory is preserved as `<data>.pre-restore-<UTC>` rather than deleted. Set the same `ANHEBRIDGE_HMAC_KEY` used by the source database before running verified restore.
+
+The Docker image also includes `/usr/local/bin/anhe-restore`. Run it from a one-off container with the database service stopped and the data/config volumes mounted; the normal image entrypoint remains `anhe-server`.
+
+The archive intentionally rebuilds volatile indexes during import rather than copying indexes while they are changing. An R2 or Lark configuration error does not terminate the database; local backup remains active and the failure is recorded in logs and metrics.
+
 To enable auth for dashboard and CLI, set:
 
 ```json
@@ -772,6 +883,8 @@ The server now exposes:
   - segment/index/snapshot/manifest sizes
   - recovery timings
   - append / latest-index flush timings
+  - automatic backup run/failure totals, last success time, duration, size
+  - automatic monitor alert totals
 - `/debug/perf`
   - bucket backlog detail
   - segment manifests

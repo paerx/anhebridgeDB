@@ -6,6 +6,7 @@ bin/
 data/**/*.anhe
 
 data/**/*.json
+data/backups/
 
 # Docs assets and local docs payloads
 docs/*

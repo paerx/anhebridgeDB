@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/paerx/anhebridgedb/internal/auth"
+	backupsvc "github.com/paerx/anhebridgedb/internal/backup"
 	"github.com/paerx/anhebridgedb/internal/config"
 	"github.com/paerx/anhebridgedb/internal/db"
 	"github.com/paerx/anhebridgedb/internal/httpapi"
@@ -39,6 +40,17 @@ func main() {
 	defer cancelRun()
 	engine.StartScheduler(runCtx, *schedulerInterval)
 	engine.StartMetricsSampler(runCtx, time.Duration(cfg.Performance.MetricsSampleIntervalSeconds)*time.Second)
+	var backupManager *backupsvc.Manager
+	if cfg.Backup.Enabled {
+		backupManager, err = backupsvc.NewManager(engine, cfg.Backup)
+		if err != nil {
+			log.Printf("automatic backup disabled: %v", err)
+		} else {
+			backupManager.Start(runCtx)
+			log.Printf("automatic backup enabled: mode=%s interval=%ds spool=%s upload=%t monitor=%t",
+				cfg.Backup.Mode, cfg.Backup.IntervalSeconds, cfg.Backup.SpoolDir, cfg.Backup.Upload.Enabled, cfg.Backup.Monitor.Enabled)
+		}
+	}
 	authManager := auth.New(cfg.Auth)
 
 	server := &http.Server{
@@ -63,5 +75,8 @@ func main() {
 	cancelRun()
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+	if backupManager != nil {
+		backupManager.Wait(ctx)
 	}
 }

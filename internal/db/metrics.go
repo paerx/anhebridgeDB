@@ -99,6 +99,12 @@ type perfMetrics struct {
 	superResolved  uint64
 	superPreserved uint64
 	superCacheHits uint64
+	backupRuns     uint64
+	backupFailures uint64
+	backupLastUnix int64
+	backupLastMS   uint64
+	backupLastSize uint64
+	monitorAlerts  uint64
 	deriveMu       sync.Mutex
 	lastSampleAt   time.Time
 	lastCPUSec     float64
@@ -161,6 +167,12 @@ func (e *Engine) Metrics() map[string]any {
 		"super_value_refs_resolved_total":      atomic.LoadUint64(&e.metrics.superResolved),
 		"super_value_subtrees_preserved_total": atomic.LoadUint64(&e.metrics.superPreserved),
 		"super_value_resolve_cache_hits_total": atomic.LoadUint64(&e.metrics.superCacheHits),
+		"backup_runs_total":                    atomic.LoadUint64(&e.metrics.backupRuns),
+		"backup_failures_total":                atomic.LoadUint64(&e.metrics.backupFailures),
+		"backup_last_success_unix":             atomic.LoadInt64(&e.metrics.backupLastUnix),
+		"backup_last_duration_ms":              atomic.LoadUint64(&e.metrics.backupLastMS),
+		"backup_last_size_bytes":               atomic.LoadUint64(&e.metrics.backupLastSize),
+		"monitor_alerts_total":                 atomic.LoadUint64(&e.metrics.monitorAlerts),
 	}
 	now := time.Now().UTC()
 	if mem.Sys > 0 {
@@ -214,6 +226,23 @@ func (e *Engine) Metrics() map[string]any {
 	}
 	e.decorateDerivedRuntimeMetrics(metrics, now, cpuSec)
 	return metrics
+}
+
+func (e *Engine) RecordBackupResult(duration time.Duration, size int64, backupErr error) {
+	atomic.AddUint64(&e.metrics.backupRuns, 1)
+	atomic.StoreUint64(&e.metrics.backupLastMS, uint64(max(duration.Milliseconds(), 0)))
+	if size > 0 {
+		atomic.StoreUint64(&e.metrics.backupLastSize, uint64(size))
+	}
+	if backupErr != nil {
+		atomic.AddUint64(&e.metrics.backupFailures, 1)
+		return
+	}
+	atomic.StoreInt64(&e.metrics.backupLastUnix, time.Now().UTC().Unix())
+}
+
+func (e *Engine) RecordMonitorAlert() {
+	atomic.AddUint64(&e.metrics.monitorAlerts, 1)
 }
 
 func (e *Engine) decorateDerivedRuntimeMetrics(metrics map[string]any, now time.Time, cpuSec float64) {

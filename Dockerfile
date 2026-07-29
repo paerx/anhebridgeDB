@@ -7,6 +7,7 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/anhe-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/anhe-restore ./cmd/restore
 
 FROM alpine:3.20
 
@@ -15,6 +16,7 @@ RUN addgroup -S anhe && adduser -S anhe -G anhe
 WORKDIR /app
 
 COPY --from=builder /out/anhe-server /usr/local/bin/anhe-server
+COPY --from=builder /out/anhe-restore /usr/local/bin/anhe-restore
 COPY config/config.json /app/config/config.json
 
 RUN mkdir -p /app/data /app/config && chown -R anhe:anhe /app
