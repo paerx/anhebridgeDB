@@ -90,8 +90,6 @@ func jsonNumber(value int) string {
 func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 	store, server := newFakeR2Server(t)
 	defer server.Close()
-	t.Setenv("TEST_R2_ACCESS", "access")
-	t.Setenv("TEST_R2_SECRET", "secret")
 
 	sourceDir := t.TempDir()
 	engine, err := db.Open(sourceDir)
@@ -111,8 +109,8 @@ func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 	cfg.Backup.Upload.Endpoint = server.URL
 	cfg.Backup.Upload.Bucket = "bucket"
 	cfg.Backup.Upload.Prefix = "database"
-	cfg.Backup.Upload.AccessKeyEnv = "TEST_R2_ACCESS"
-	cfg.Backup.Upload.SecretAccessKeyEnv = "TEST_R2_SECRET"
+	cfg.Backup.Upload.AccessKeyID = "access"
+	cfg.Backup.Upload.SecretAccessKey = "secret"
 	manager, err := NewManager(engine, cfg.Backup)
 	if err != nil {
 		t.Fatal(err)

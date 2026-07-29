@@ -36,10 +36,10 @@ func newR2Uploader(cfg config.BackupUploadConfig) (*r2Uploader, error) {
 	if cfg.Bucket == "" {
 		return nil, fmt.Errorf("backup r2 bucket is required")
 	}
-	accessKey := strings.TrimSpace(os.Getenv(cfg.AccessKeyEnv))
-	secretKey := strings.TrimSpace(os.Getenv(cfg.SecretAccessKeyEnv))
+	accessKey := strings.TrimSpace(cfg.AccessKeyID)
+	secretKey := strings.TrimSpace(cfg.SecretAccessKey)
 	if accessKey == "" || secretKey == "" {
-		return nil, fmt.Errorf("backup r2 credentials are missing from %s/%s", cfg.AccessKeyEnv, cfg.SecretAccessKeyEnv)
+		return nil, fmt.Errorf("backup r2 access_key_id and secret_access_key are required")
 	}
 	return &r2Uploader{
 		endpoint:   endpoint,

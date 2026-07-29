@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +24,13 @@ type larkNotifier struct {
 }
 
 func newLarkNotifier(cfg config.BackupLarkConfig) (*larkNotifier, error) {
-	webhook := strings.TrimSpace(os.Getenv(cfg.WebhookEnv))
+	webhook := strings.TrimSpace(cfg.Webhook)
 	if webhook == "" {
-		return nil, fmt.Errorf("lark webhook is missing from %s", cfg.WebhookEnv)
+		return nil, fmt.Errorf("lark webhook is required")
 	}
 	return &larkNotifier{
 		webhook:    webhook,
-		secret:     strings.TrimSpace(os.Getenv(cfg.SecretEnv)),
+		secret:     strings.TrimSpace(cfg.Secret),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}, nil
 }

@@ -80,21 +80,21 @@ type BackupConfig struct {
 }
 
 type BackupUploadConfig struct {
-	Enabled            bool   `json:"enabled"`
-	Endpoint           string `json:"endpoint"`
-	Bucket             string `json:"bucket"`
-	Prefix             string `json:"prefix"`
-	AccessKeyEnv       string `json:"access_key_env"`
-	SecretAccessKeyEnv string `json:"secret_access_key_env"`
-	MaxObjectBytes     int64  `json:"max_object_bytes"`
-	RetryCount         int    `json:"retry_count"`
-	RetryBackoffMS     int    `json:"retry_backoff_ms"`
+	Enabled         bool   `json:"enabled"`
+	Endpoint        string `json:"endpoint"`
+	Bucket          string `json:"bucket"`
+	Prefix          string `json:"prefix"`
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+	MaxObjectBytes  int64  `json:"max_object_bytes"`
+	RetryCount      int    `json:"retry_count"`
+	RetryBackoffMS  int    `json:"retry_backoff_ms"`
 }
 
 type BackupLarkConfig struct {
 	Enabled       bool   `json:"enabled"`
-	WebhookEnv    string `json:"webhook_env"`
-	SecretEnv     string `json:"secret_env"`
+	Webhook       string `json:"webhook"`
+	Secret        string `json:"secret"`
 	NotifySuccess bool   `json:"notify_success"`
 }
 
@@ -160,18 +160,14 @@ func Default() Config {
 			KeepLocal:           true,
 			LocalRetentionCount: 3,
 			Upload: BackupUploadConfig{
-				Enabled:            false,
-				Prefix:             "anhebridgedb",
-				AccessKeyEnv:       "ANHEBRIDGE_R2_ACCESS_KEY_ID",
-				SecretAccessKeyEnv: "ANHEBRIDGE_R2_SECRET_ACCESS_KEY",
-				MaxObjectBytes:     5 * 1024 * 1024 * 1024,
-				RetryCount:         3,
-				RetryBackoffMS:     1000,
+				Enabled:        false,
+				Prefix:         "anhebridgedb",
+				MaxObjectBytes: 5 * 1024 * 1024 * 1024,
+				RetryCount:     3,
+				RetryBackoffMS: 1000,
 			},
 			Lark: BackupLarkConfig{
 				Enabled:       false,
-				WebhookEnv:    "ANHEBRIDGE_LARK_WEBHOOK",
-				SecretEnv:     "ANHEBRIDGE_LARK_SECRET",
 				NotifySuccess: true,
 			},
 			Monitor: BackupMonitorConfig{
@@ -289,12 +285,6 @@ func normalizeBackupConfig(cfg *BackupConfig) {
 	if cfg.Upload.Prefix == "" {
 		cfg.Upload.Prefix = defaults.Upload.Prefix
 	}
-	if cfg.Upload.AccessKeyEnv == "" {
-		cfg.Upload.AccessKeyEnv = defaults.Upload.AccessKeyEnv
-	}
-	if cfg.Upload.SecretAccessKeyEnv == "" {
-		cfg.Upload.SecretAccessKeyEnv = defaults.Upload.SecretAccessKeyEnv
-	}
 	if cfg.Upload.MaxObjectBytes <= 0 {
 		cfg.Upload.MaxObjectBytes = defaults.Upload.MaxObjectBytes
 	}
@@ -306,12 +296,6 @@ func normalizeBackupConfig(cfg *BackupConfig) {
 	}
 	if cfg.Upload.RetryBackoffMS <= 0 {
 		cfg.Upload.RetryBackoffMS = defaults.Upload.RetryBackoffMS
-	}
-	if cfg.Lark.WebhookEnv == "" {
-		cfg.Lark.WebhookEnv = defaults.Lark.WebhookEnv
-	}
-	if cfg.Lark.SecretEnv == "" {
-		cfg.Lark.SecretEnv = defaults.Lark.SecretEnv
 	}
 	if cfg.Monitor.IntervalSeconds < 10 {
 		cfg.Monitor.IntervalSeconds = defaults.Monitor.IntervalSeconds

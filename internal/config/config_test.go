@@ -34,7 +34,36 @@ func TestLoadNormalizesPartialBackupConfig(t *testing.T) {
 	if cfg.Backup.IntervalSeconds != Default().Backup.IntervalSeconds {
 		t.Fatalf("interval = %d, want default", cfg.Backup.IntervalSeconds)
 	}
-	if cfg.Backup.Upload.AccessKeyEnv == "" || cfg.Backup.Upload.SecretAccessKeyEnv == "" {
-		t.Fatal("expected default R2 credential environment names")
+	if cfg.Backup.Upload.Prefix == "" {
+		t.Fatal("expected default R2 object prefix")
+	}
+}
+
+func TestLoadBackupCredentialsFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	content := `{
+		"backup": {
+			"upload": {
+				"access_key_id": "access",
+				"secret_access_key": "secret"
+			},
+			"lark": {
+				"webhook": "https://example.test/hook",
+				"secret": "signing-secret"
+			}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Backup.Upload.AccessKeyID != "access" || cfg.Backup.Upload.SecretAccessKey != "secret" {
+		t.Fatal("R2 credentials were not loaded from config")
+	}
+	if cfg.Backup.Lark.Webhook != "https://example.test/hook" || cfg.Backup.Lark.Secret != "signing-secret" {
+		t.Fatal("Lark credentials were not loaded from config")
 	}
 }

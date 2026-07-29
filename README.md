@@ -272,16 +272,16 @@ Automatic backup is opt-in and disabled by default. When enabled, the server rot
       "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
       "bucket": "anhe-backups",
       "prefix": "production",
-      "access_key_env": "ANHEBRIDGE_R2_ACCESS_KEY_ID",
-      "secret_access_key_env": "ANHEBRIDGE_R2_SECRET_ACCESS_KEY",
+      "access_key_id": "<r2-access-key-id>",
+      "secret_access_key": "<r2-secret-access-key>",
       "max_object_bytes": 5368709120,
       "retry_count": 3,
       "retry_backoff_ms": 1000
     },
     "lark": {
       "enabled": true,
-      "webhook_env": "ANHEBRIDGE_LARK_WEBHOOK",
-      "secret_env": "ANHEBRIDGE_LARK_SECRET",
+      "webhook": "https://open.larksuite.com/open-apis/bot/v2/hook/...",
+      "secret": "",
       "notify_success": true
     },
     "monitor": {
@@ -301,14 +301,7 @@ Automatic backup is opt-in and disabled by default. When enabled, the server rot
 }
 ```
 
-Secrets are read from environment variables and are never persisted in the backup:
-
-```bash
-export ANHEBRIDGE_R2_ACCESS_KEY_ID='...'
-export ANHEBRIDGE_R2_SECRET_ACCESS_KEY='...'
-export ANHEBRIDGE_LARK_WEBHOOK='https://open.feishu.cn/open-apis/bot/v2/hook/...'
-export ANHEBRIDGE_LARK_SECRET='...'
-```
+R2 and Lark credentials are read directly from `config.json`. Lark `secret` is optional and is only required when bot signature verification is enabled. Because this file now contains plaintext credentials, set filesystem permissions to `0600`, restrict deployment access, and never commit production credentials.
 
 Threshold value `0` disables that individual alert. Alerts require `consecutive_breaches` consecutive samples and use `alert_cooldown_seconds` to prevent notification storms. Full HMAC-chain verification runs separately at `verify_interval_seconds`; set it to `0` to disable deep verification.
 
