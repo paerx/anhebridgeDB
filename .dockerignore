@@ -7,6 +7,7 @@ b.log
 /config/config.json
 anhebridgedb-full*.tar.gz
 anhebridgedb-full*.tar.gz.sha256
+高考志愿06303.pdf
 data/log
 data/snapshot
 sdkdemo

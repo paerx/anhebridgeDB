@@ -6,6 +6,7 @@ bin/
 /config/config.json
 /anhebridgedb-full*.tar.gz
 /anhebridgedb-full*.tar.gz.sha256
+/高考志愿06303.pdf
 
 # Local runtime data
 data/**/*.anhe
