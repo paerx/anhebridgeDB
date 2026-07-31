@@ -328,6 +328,14 @@ Incremental R2 layout:
 
 The local `incremental-state.json` avoids hashing stable segments on every run. If it is lost, content-addressed R2 HEAD checks prevent already uploaded segment bodies from being uploaded again.
 
+After a successful incremental backup, the local state also records a stable
+content fingerprint. If `LastEventID`, the event auth-chain head, rules, task
+buckets, segment manifests, WAL, and normalized checkpoint metadata are all
+unchanged, the next scheduled run is skipped: no generation directory or
+manifest is created and `incremental/latest.json` is not updated. Changing the
+R2 endpoint, bucket, or prefix invalidates the fingerprint and forces a new
+generation. Skips are exposed as `backup_skipped_total`.
+
 Archive compaction output is capped at 4 GiB and already compacted archives are not merged again, keeping each incremental object below the default 5 GiB single-upload ceiling.
 
 If `mode` is `full`, or R2 upload is disabled, the existing local `.tar.gz` full-backup path remains available.

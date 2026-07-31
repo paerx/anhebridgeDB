@@ -101,6 +101,7 @@ type perfMetrics struct {
 	superCacheHits uint64
 	backupRuns     uint64
 	backupFailures uint64
+	backupSkipped  uint64
 	backupLastUnix int64
 	backupLastMS   uint64
 	backupLastSize uint64
@@ -169,6 +170,7 @@ func (e *Engine) Metrics() map[string]any {
 		"super_value_resolve_cache_hits_total": atomic.LoadUint64(&e.metrics.superCacheHits),
 		"backup_runs_total":                    atomic.LoadUint64(&e.metrics.backupRuns),
 		"backup_failures_total":                atomic.LoadUint64(&e.metrics.backupFailures),
+		"backup_skipped_total":                 atomic.LoadUint64(&e.metrics.backupSkipped),
 		"backup_last_success_unix":             atomic.LoadInt64(&e.metrics.backupLastUnix),
 		"backup_last_duration_ms":              atomic.LoadUint64(&e.metrics.backupLastMS),
 		"backup_last_size_bytes":               atomic.LoadUint64(&e.metrics.backupLastSize),
@@ -239,6 +241,10 @@ func (e *Engine) RecordBackupResult(duration time.Duration, size int64, backupEr
 		return
 	}
 	atomic.StoreInt64(&e.metrics.backupLastUnix, time.Now().UTC().Unix())
+}
+
+func (e *Engine) RecordBackupSkipped() {
+	atomic.AddUint64(&e.metrics.backupSkipped, 1)
 }
 
 func (e *Engine) RecordMonitorAlert() {

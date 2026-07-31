@@ -17,6 +17,7 @@ import (
 )
 
 const incrementalFormatVersion = 1
+const incrementalStateFormatVersion = 2
 
 type IncrementalManifest struct {
 	FormatVersion int                       `json:"format_version"`
@@ -49,6 +50,11 @@ type LatestPointer struct {
 type incrementalState struct {
 	FormatVersion int                              `json:"format_version"`
 	UpdatedAt     time.Time                        `json:"updated_at"`
+	LastEventID   uint64                           `json:"last_event_id"`
+	ContentHash   string                           `json:"content_hash,omitempty"`
+	BackupID      string                           `json:"backup_id,omitempty"`
+	ManifestKey   string                           `json:"manifest_key,omitempty"`
+	RemoteTarget  string                           `json:"remote_target,omitempty"`
 	Files         map[string]incrementalStateEntry `json:"files"`
 }
 
@@ -77,6 +83,23 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 
 	statePath := filepath.Join(m.cfg.SpoolDir, "incremental-state.json")
 	state := loadIncrementalState(statePath)
+	paths, err := listViewFiles(view.Path)
+	if err != nil {
+		return "", "", 0, view.LastEventID, err
+	}
+	contentHash, err := incrementalViewContentHash(view.Path, paths, view.LastEventID, view.LastAuthTag)
+	if err != nil {
+		return "", "", 0, view.LastEventID, err
+	}
+	remoteTarget := m.uploader.stateTarget()
+	if state.ContentHash != "" &&
+		state.ContentHash == contentHash &&
+		state.LastEventID == view.LastEventID &&
+		state.ManifestKey != "" &&
+		state.RemoteTarget == remoteTarget {
+		return "", state.ManifestKey, 0, view.LastEventID, nil
+	}
+
 	backupID := fmt.Sprintf("%s-e%d", view.CreatedAt.UTC().Format("20060102T150405.000000000Z"), view.LastEventID)
 	manifest := IncrementalManifest{
 		FormatVersion: incrementalFormatVersion,
@@ -86,15 +109,15 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 		LastAuthTag:   view.LastAuthTag,
 	}
 	nextState := incrementalState{
-		FormatVersion: incrementalFormatVersion,
+		FormatVersion: incrementalStateFormatVersion,
 		UpdatedAt:     view.CreatedAt,
+		LastEventID:   view.LastEventID,
+		ContentHash:   contentHash,
+		BackupID:      backupID,
+		RemoteTarget:  remoteTarget,
 		Files:         make(map[string]incrementalStateEntry),
 	}
 
-	paths, err := listViewFiles(view.Path)
-	if err != nil {
-		return "", "", 0, view.LastEventID, err
-	}
 	var uploadedBytes int64
 	for _, relative := range paths {
 		source := filepath.Join(view.Path, filepath.FromSlash(relative))
@@ -204,10 +227,6 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 	if err := writeFileAtomic(localManifest, manifestBytes, 0o600); err != nil {
 		return "", manifestKey, uploadedBytes, view.LastEventID, err
 	}
-	if err := saveIncrementalState(statePath, nextState); err != nil {
-		return localManifest, manifestKey, uploadedBytes, view.LastEventID, err
-	}
-
 	latestKey := m.uploader.prefixedKey(filepath.ToSlash(filepath.Join("incremental", "latest.json")))
 	if err := m.retry(ctx, func() error {
 		return m.uploader.putBytes(ctx, pointerBytes, latestKey, "application/json")
@@ -215,8 +234,72 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 		return localManifest, latestKey, uploadedBytes, view.LastEventID, err
 	}
 	uploadedBytes += int64(len(pointerBytes))
+	nextState.ManifestKey = manifestKey
+	if err := saveIncrementalState(statePath, nextState); err != nil {
+		return localManifest, manifestKey, uploadedBytes, view.LastEventID, err
+	}
 	m.pruneLocalManifests()
 	return localManifest, manifestKey, uploadedBytes, view.LastEventID, nil
+}
+
+type incrementalFingerprint struct {
+	LastEventID uint64                       `json:"last_event_id"`
+	LastAuthTag string                       `json:"last_auth_tag,omitempty"`
+	Files       []incrementalFingerprintFile `json:"files"`
+}
+
+type incrementalFingerprintFile struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+}
+
+func incrementalViewContentHash(
+	root string,
+	paths []string,
+	lastEventID uint64,
+	lastAuthTag string,
+) (string, error) {
+	fingerprint := incrementalFingerprint{
+		LastEventID: lastEventID,
+		LastAuthTag: lastAuthTag,
+	}
+	for _, relative := range paths {
+		if isImmutableEventSegment(relative) {
+			continue
+		}
+		source := filepath.Join(root, filepath.FromSlash(relative))
+		data, err := stableIncrementalMetadata(relative, source)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(data)
+		fingerprint.Files = append(fingerprint.Files, incrementalFingerprintFile{
+			Path:   relative,
+			SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+	data, err := json.Marshal(fingerprint)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func stableIncrementalMetadata(relative, source string) ([]byte, error) {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.ToSlash(relative) != "log/checkpoint.json" {
+		return data, nil
+	}
+	var checkpoint storage.LogCheckpoint
+	if err := json.Unmarshal(data, &checkpoint); err != nil {
+		return nil, fmt.Errorf("decode backup checkpoint for fingerprint: %w", err)
+	}
+	checkpoint.UpdatedAt = time.Time{}
+	return json.Marshal(checkpoint)
 }
 
 func listViewFiles(root string) ([]string, error) {
@@ -248,7 +331,7 @@ func isImmutableEventSegment(relative string) bool {
 }
 
 func loadIncrementalState(path string) incrementalState {
-	state := incrementalState{FormatVersion: incrementalFormatVersion, Files: map[string]incrementalStateEntry{}}
+	state := incrementalState{FormatVersion: incrementalStateFormatVersion, Files: map[string]incrementalStateEntry{}}
 	data, err := os.ReadFile(path)
 	if err != nil || json.Unmarshal(data, &state) != nil || state.Files == nil {
 		state.Files = map[string]incrementalStateEntry{}

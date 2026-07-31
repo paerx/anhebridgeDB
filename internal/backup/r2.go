@@ -63,6 +63,14 @@ func (u *r2Uploader) objectKey(filename string, now time.Time) string {
 	return strings.Join(filtered, "/")
 }
 
+func (u *r2Uploader) stateTarget() string {
+	return strings.Join([]string{
+		strings.TrimRight(u.endpoint.String(), "/"),
+		u.bucket,
+		u.prefix,
+	}, "|")
+}
+
 func (u *r2Uploader) upload(ctx context.Context, filename, objectKey string) error {
 	return u.putFile(ctx, filename, objectKey, "application/gzip")
 }

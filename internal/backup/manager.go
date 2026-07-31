@@ -140,6 +140,16 @@ func (m *Manager) runBackupSafely(parent context.Context) {
 		m.notify(fmt.Sprintf("[AnheBridgeDB] backup FAILED\nerror: %v\nduration: %s", err, time.Since(start).Round(time.Millisecond)))
 		return
 	}
+	if filename == "" {
+		m.engine.RecordBackupSkipped()
+		log.Printf(
+			"automatic backup skipped: no changes last_event_id=%d current_manifest=%s duration=%s",
+			lastEventID,
+			objectKey,
+			time.Since(start).Round(time.Millisecond),
+		)
+		return
+	}
 	log.Printf("automatic backup completed: file=%s object=%s bytes=%d last_event_id=%d duration=%s",
 		filename, objectKey, size, lastEventID, time.Since(start).Round(time.Millisecond))
 	if m.cfg.Lark.NotifySuccess {

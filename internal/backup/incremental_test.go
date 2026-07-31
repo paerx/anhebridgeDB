@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/paerx/anhebridgedb/internal/config"
 	"github.com/paerx/anhebridgedb/internal/db"
@@ -82,6 +83,28 @@ func (s *fakeR2) immutablePuts() int {
 	return total
 }
 
+func (s *fakeR2) totalPuts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, count := range s.putCount {
+		total += count
+	}
+	return total
+}
+
+func (s *fakeR2) putsContaining(fragment string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for key, count := range s.putCount {
+		if strings.Contains(key, fragment) {
+			total += count
+		}
+	}
+	return total
+}
+
 func jsonNumber(value int) string {
 	data, _ := json.Marshal(value)
 	return string(data)
@@ -122,6 +145,22 @@ func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 		t.Fatalf("first backup immutable PUTs = %d, want 1", store.immutablePuts())
 	}
 
+	putsAfterFirst := store.totalPuts()
+	latestPutsAfterFirst := store.putsContaining("/incremental/latest.json")
+	filename, _, size, lastEventID, err := manager.runBackup(context.Background())
+	if err != nil {
+		t.Fatalf("unchanged incremental backup: %v", err)
+	}
+	if filename != "" || size != 0 || lastEventID != 1 {
+		t.Fatalf("unchanged backup was not skipped: file=%q size=%d event=%d", filename, size, lastEventID)
+	}
+	if store.totalPuts() != putsAfterFirst {
+		t.Fatalf("unchanged backup issued PUTs: before=%d after=%d", putsAfterFirst, store.totalPuts())
+	}
+	if store.putsContaining("/incremental/latest.json") != latestPutsAfterFirst {
+		t.Fatal("unchanged backup updated latest.json")
+	}
+
 	if _, err := engine.Set("restore:key", json.RawMessage(`{"version":2}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +178,43 @@ func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 	}
 	if store.immutablePuts() != 2 {
 		t.Fatalf("content-addressed segments should be reused after state loss; immutable PUTs=%d", store.immutablePuts())
+	}
+
+	putsBeforeRule := store.totalPuts()
+	if _, err := engine.CreateRule(db.RuleSpec{
+		ID:      "backup_rule",
+		Pattern: "status:*:pending",
+		Target:  "status:{id}:done",
+		Delay:   "1h",
+	}); err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	filename, _, _, lastEventID, err = manager.runBackup(context.Background())
+	if err != nil {
+		t.Fatalf("backup after rule change: %v", err)
+	}
+	if filename == "" || lastEventID != 2 || store.totalPuts() <= putsBeforeRule {
+		t.Fatalf("rule-only change did not create generation: file=%q event=%d", filename, lastEventID)
+	}
+
+	putsBeforeTask := store.totalPuts()
+	bucket := time.Now().UTC().Add(time.Hour).Truncate(time.Minute)
+	if err := storage.SaveTaskBucket(sourceDir, bucket, []storage.Task{{
+		ID:        "backup-task",
+		BucketTS:  bucket,
+		RuleID:    "backup_rule",
+		EntityKey: "status:1",
+		Status:    "pending",
+		CreatedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatalf("save task bucket: %v", err)
+	}
+	filename, _, _, lastEventID, err = manager.runBackup(context.Background())
+	if err != nil {
+		t.Fatalf("backup after task change: %v", err)
+	}
+	if filename == "" || lastEventID != 2 || store.totalPuts() <= putsBeforeTask {
+		t.Fatalf("task-only change did not create generation: file=%q event=%d", filename, lastEventID)
 	}
 
 	restoreDir := filepath.Join(t.TempDir(), "restored")
