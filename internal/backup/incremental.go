@@ -92,11 +92,12 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 		return "", "", 0, view.LastEventID, err
 	}
 	remoteTarget := m.uploader.stateTarget()
+	stateObjectsCurrent := incrementalStateObjectsCurrent(state, paths, m.uploader)
 	if state.ContentHash != "" &&
 		state.ContentHash == contentHash &&
 		state.LastEventID == view.LastEventID &&
 		state.ManifestKey != "" &&
-		state.RemoteTarget == remoteTarget {
+		stateObjectsCurrent {
 		return "", state.ManifestKey, 0, view.LastEventID, nil
 	}
 
@@ -129,10 +130,11 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 		entry, reusable := state.Files[relative]
 		reusable = reusable &&
 			immutable &&
+			stateObjectsCurrent &&
 			entry.SizeBytes == info.Size() &&
 			entry.ModTimeNS == info.ModTime().UnixNano() &&
-			entry.SHA256 != "" &&
-			entry.ObjectKey != ""
+			len(entry.SHA256) >= 2 &&
+			entry.ObjectKey == m.uploader.immutableObjectKey(entry.SHA256)
 
 		if !reusable {
 			hash, err := fileSHA256(source)
@@ -145,9 +147,7 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 				SHA256:    hash,
 			}
 			if immutable {
-				entry.ObjectKey = m.uploader.prefixedKey(filepath.ToSlash(filepath.Join(
-					"incremental", "objects", hash[:2], hash+".anhe",
-				)))
+				entry.ObjectKey = m.uploader.immutableObjectKey(hash)
 			} else {
 				entry.ObjectKey = m.uploader.prefixedKey(filepath.ToSlash(filepath.Join(
 					"incremental", "backups", backupID, "files", relative,
@@ -240,6 +240,27 @@ func (m *Manager) runIncrementalBackup(ctx context.Context) (filename, objectKey
 	}
 	m.pruneLocalManifests()
 	return localManifest, manifestKey, uploadedBytes, view.LastEventID, nil
+}
+
+func incrementalStateObjectsCurrent(state incrementalState, paths []string, uploader *r2Uploader) bool {
+	if state.FormatVersion != incrementalStateFormatVersion || state.RemoteTarget != uploader.stateTarget() {
+		return false
+	}
+	for _, relative := range paths {
+		if !isImmutableEventSegment(relative) {
+			continue
+		}
+		entry, found := state.Files[relative]
+		if !found || len(entry.SHA256) < 2 || entry.ObjectKey != uploader.immutableObjectKey(entry.SHA256) {
+			return false
+		}
+	}
+	for _, entry := range state.Files {
+		if len(entry.SHA256) < 2 || entry.ObjectKey != uploader.immutableObjectKey(entry.SHA256) {
+			return false
+		}
+	}
+	return true
 }
 
 type incrementalFingerprint struct {

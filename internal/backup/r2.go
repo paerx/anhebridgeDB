@@ -71,6 +71,10 @@ func (u *r2Uploader) stateTarget() string {
 	}, "|")
 }
 
+func (u *r2Uploader) immutableObjectKey(hash string) string {
+	return u.prefixedKey(path.Join("incremental", "objects", hash[:2], hash+".anhe"))
+}
+
 func (u *r2Uploader) upload(ctx context.Context, filename, objectKey string) error {
 	return u.putFile(ctx, filename, objectKey, "application/gzip")
 }

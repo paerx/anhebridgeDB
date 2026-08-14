@@ -105,6 +105,13 @@ func (s *fakeR2) putsContaining(fragment string) int {
 	return total
 }
 
+func (s *fakeR2) object(key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, found := s.objects[key]
+	return append([]byte(nil), data...), found
+}
+
 func jsonNumber(value int) string {
 	data, _ := json.Marshal(value)
 	return string(data)
@@ -267,6 +274,84 @@ func TestIncrementalBackupReusesSegmentsAndRestoresLatest(t *testing.T) {
 	}
 	if string(volumeRecord.Value) != `{"version":2}` {
 		t.Fatalf("volume restored value = %s", volumeRecord.Value)
+	}
+}
+
+func TestIncrementalBackupPrefixMigrationRepairsImmutableObjectKeys(t *testing.T) {
+	store, server := newFakeR2Server(t)
+	defer server.Close()
+
+	sourceDir := t.TempDir()
+	engine, err := db.Open(sourceDir)
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	defer engine.Close()
+	if _, err := engine.Set("prefix:key", json.RawMessage(`{"value":1}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Backup.Enabled = true
+	cfg.Backup.Mode = "incremental"
+	cfg.Backup.SpoolDir = filepath.Join(t.TempDir(), "spool")
+	cfg.Backup.Upload.Enabled = true
+	cfg.Backup.Upload.Endpoint = server.URL
+	cfg.Backup.Upload.Bucket = "bucket"
+	cfg.Backup.Upload.Prefix = "anhe"
+	cfg.Backup.Upload.AccessKeyID = "access"
+	cfg.Backup.Upload.SecretAccessKey = "secret"
+	manager, err := NewManager(engine, cfg.Backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := manager.runBackup(context.Background()); err != nil {
+		t.Fatalf("backup using old prefix: %v", err)
+	}
+
+	manager.uploader.prefix = "anhebackup_prod"
+	statePath := filepath.Join(cfg.Backup.SpoolDir, "incremental-state.json")
+	state := loadIncrementalState(statePath)
+	state.RemoteTarget = manager.uploader.stateTarget()
+	state.ManifestKey = "anhebackup_prod/incremental/manifests/stale.json"
+	if err := saveIncrementalState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+
+	filename, _, _, _, err := manager.runBackup(context.Background())
+	if err != nil {
+		t.Fatalf("backup after prefix migration: %v", err)
+	}
+	if filename == "" {
+		t.Fatal("prefix migration was incorrectly skipped")
+	}
+
+	pointerData, found := store.object("bucket/anhebackup_prod/incremental/latest.json")
+	if !found {
+		t.Fatal("new prefix latest pointer was not uploaded")
+	}
+	var pointer LatestPointer
+	if err := json.Unmarshal(pointerData, &pointer); err != nil {
+		t.Fatal(err)
+	}
+	manifestData, found := store.object("bucket/" + pointer.ManifestKey)
+	if !found {
+		t.Fatalf("new manifest %q was not uploaded", pointer.ManifestKey)
+	}
+	var manifest IncrementalManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range manifest.Files {
+		if !file.Immutable {
+			continue
+		}
+		if !strings.HasPrefix(file.ObjectKey, "anhebackup_prod/incremental/objects/") {
+			t.Fatalf("immutable object retained stale prefix: %q", file.ObjectKey)
+		}
+		if _, found := store.object("bucket/" + file.ObjectKey); !found {
+			t.Fatalf("immutable object %q was not uploaded", file.ObjectKey)
+		}
 	}
 }
 
